@@ -1,0 +1,270 @@
+import { _decorator, Component, Node, Tween, tween, Vec3 } from 'cc';
+import type { CloudEffect } from '../Effects/CloudEffect';
+import { PoolType } from '../../Core/Pooling/PoolMember';
+import { World } from '../../Core/Managers/World';
+import { ipm } from '../../Core/Managers/InputManager';
+import { Ply_Event } from '../Framework/Ply_Event';
+import { Ply_Singleton } from '../Framework/Ply_Singleton';
+import { FxType, Ply_SoundManager } from '../Framework/Ply_SoundManager';
+import { HandTutManager } from './HandTutManager';
+
+const { ccclass, property } = _decorator;
+
+/**
+ * Shows cleaning items one at a time. Call ItemCleanDone() when the current
+ * item has been cleaned to hide it and reveal the next configured item.
+ */
+@ccclass('ItemCleanManager')
+export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
+    // Do not reference Item here. Item imports this manager, so that would
+    // create a runtime circular import in Cocos' scene script loader.
+    @property([Component])
+    public items: Component[] = [];
+
+    @property({ tooltip: 'Show the first item automatically when this manager starts.' })
+    public autoStart = true;
+
+    @property({ min: 0.01, tooltip: 'Zoom duration used when an item appears or disappears.' })
+    public zoomDuration = 0.25;
+
+    @property({ tooltip: 'Spawn a cloud effect when the next cleaning item appears.' })
+    public spawnCloudOnItemShow = true;
+
+    @property({ type: Node, tooltip: 'Node that flies up after every cleaning item has been completed.' })
+    public itemConveyor: Node | null = null;
+
+    @property({ type: Vec3, tooltip: 'Local offset below the configured Item Conveyor position before it flies in.' })
+    public itemConveyorStartOffset = new Vec3(0, -1000, 0);
+
+    @property({ min: 0.01, tooltip: 'Seconds used for Item Conveyor to fly into its configured position.' })
+    public itemConveyorFlyDuration = 0.5;
+
+    @property({ tooltip: 'Move and zoom InputManager screenTarget after all cleaning items are complete.' })
+    public moveScreenTargetOnComplete = false;
+
+    @property({ type: Vec3, tooltip: 'screenTarget local position after all cleaning items are complete.' })
+    public completedScreenTargetPosition = new Vec3();
+
+    @property({ tooltip: 'screenTarget uniform scale after all cleaning items are complete.' })
+    public completedScreenTargetScale = 1;
+
+    @property({ min: 0.01, tooltip: 'Seconds used to move and zoom screenTarget after completion.' })
+    public completedScreenTargetDuration = 0.5;
+
+    @property({ type: Ply_Event, tooltip: 'Called after the final item has disappeared.' })
+    public onAllItemsCleaned: Ply_Event = new Ply_Event();
+
+    @property({ type: Ply_Event, tooltip: 'Called after the final screen-target transition has completed.' })
+    public onCompleteScreen: Ply_Event = new Ply_Event();
+
+    @property({ readonly: true, tooltip: 'Index of the item currently being cleaned (-1 when idle/complete).' })
+    public currentItemIndex = -1;
+
+    private readonly itemScales = new Map<Component, Vec3>();
+    private activeTween: Tween<Node> | null = null;
+    private itemConveyorTween: Tween<Node> | null = null;
+    private completedScreenTargetTween: Tween<Node> | null = null;
+    private itemConveyorTargetPosition = new Vec3();
+    private hasItemConveyorTargetPosition = false;
+    private isTransitioning = false;
+    private hasCompletedSequence = false;
+
+    protected onLoad(): void {
+        super.onLoad();
+        this.cacheItemScales();
+        this.cacheItemConveyorTargetPosition();
+        this.resetItemConveyor();
+        this.setAllItemsInactive();
+    }
+
+    protected start(): void {
+        if (this.autoStart) this.StartItems();
+    }
+
+    protected onDisable(): void {
+        this.stopActiveTween();
+        this.isTransitioning = false;
+    }
+
+    /** Restarts the sequence from its first configured item. */
+    public StartItems(): void {
+        this.stopActiveTween();
+        this.cacheItemScales();
+        this.resetItemConveyor();
+        this.setAllItemsInactive();
+        this.currentItemIndex = -1;
+        this.isTransitioning = false;
+        this.hasCompletedSequence = false;
+        this.ShowNextItem();
+        this.scheduleOnce(() => {
+            HandTutManager.Ins?.StartHandTutNoDelay();
+        }, 0);
+    }
+
+    /** Hides the active item, then displays the next one in the array. */
+    public ItemCleanDone(): void {
+        if (this.isTransitioning || this.currentItemIndex < 0 || this.hasCompletedSequence) return;
+
+        const item = this.items[this.currentItemIndex];
+        if (!item || !item.isValid) {
+            this.ShowNextItem();
+            return;
+        }
+
+        this.isTransitioning = true;
+        this.stopActiveTween();
+        const zeroScale = this.getZeroScale(item);
+        this.activeTween = tween(item.node)
+            .to(this.zoomDuration, { scale: zeroScale }, { easing: 'backIn' })
+            .call(() => {
+                item.node.active = false;
+                this.activeTween = null;
+                this.isTransitioning = false;
+                this.ShowNextItem();
+            })
+            .start();
+    }
+
+    /** Shows the following valid item in the configured order. */
+    public ShowNextItem(): void {
+        if (this.isTransitioning || this.hasCompletedSequence) return;
+
+        let nextIndex = this.currentItemIndex + 1;
+        while (nextIndex < this.items.length && (!this.items[nextIndex] || !this.items[nextIndex].isValid)) {
+            nextIndex++;
+        }
+
+        if (nextIndex >= this.items.length) {
+            this.currentItemIndex = -1;
+            this.hasCompletedSequence = true;
+            this.ShowItemConveyor();
+            this.MoveScreenTargetOnComplete();
+            this.onAllItemsCleaned?.invoke();
+            return;
+        }
+
+        this.currentItemIndex = nextIndex;
+        const item = this.items[nextIndex];
+        const targetScale = this.getItemScale(item);
+        item.node.active = true;
+        item.node.setScale(this.getZeroScale(item));
+        Ply_SoundManager.Ins?.PlayFx(FxType.CleanItemAppear);
+        this.SpawnItemShowCloud(item);
+
+        this.stopActiveTween();
+        this.activeTween = tween(item.node)
+            .to(this.zoomDuration, { scale: targetScale }, { easing: 'backOut' })
+            .call(() => this.activeTween = null)
+            .start();
+    }
+
+    private cacheItemScales(): void {
+        for (const item of this.items) {
+            if (!item || !item.isValid || this.itemScales.has(item)) continue;
+            this.itemScales.set(item, item.node.scale.clone());
+        }
+    }
+
+    private setAllItemsInactive(): void {
+        for (const item of this.items) {
+            if (!item || !item.isValid) continue;
+            Tween.stopAllByTarget(item.node);
+            item.node.active = false;
+        }
+    }
+
+    private getItemScale(item: Component): Vec3 {
+        return this.itemScales.get(item)?.clone() ?? item.node.scale.clone();
+    }
+
+    private getZeroScale(item: Component): Vec3 {
+        const scale = this.getItemScale(item);
+        return new Vec3(0, 0, scale.z);
+    }
+
+    private stopActiveTween(): void {
+        this.activeTween?.stop();
+        this.activeTween = null;
+    }
+
+    private SpawnItemShowCloud(item: Component): void {
+        if (!this.spawnCloudOnItemShow) return;
+
+        const cloud = World.instance?.poolManager?.spawnType<CloudEffect>(PoolType.Cloud, item.node.worldPosition);
+        if (!cloud) return;
+
+        // Render beside the item rather than under the pool root. This keeps
+        // the cloud in the same Canvas/layer and above the appearing item.
+        const itemParent = item.node.parent;
+        if (itemParent) {
+            const worldPosition = item.node.worldPosition.clone();
+            cloud.node.setParent(itemParent);
+            cloud.node.setWorldPosition(worldPosition);
+            cloud.node.setSiblingIndex(itemParent.children.length - 1);
+        }
+
+        cloud.PlaySpawn();
+    }
+
+    public resetInEditor(): void {
+        if (!this.onAllItemsCleaned) this.onAllItemsCleaned = new Ply_Event();
+        if (!this.onCompleteScreen) this.onCompleteScreen = new Ply_Event();
+    }
+
+    private cacheItemConveyorTargetPosition(): void {
+        if (!this.itemConveyor?.isValid) return;
+        Vec3.copy(this.itemConveyorTargetPosition, this.itemConveyor.position);
+        this.hasItemConveyorTargetPosition = true;
+    }
+
+    private resetItemConveyor(): void {
+        if (!this.itemConveyor?.isValid) return;
+        if (!this.hasItemConveyorTargetPosition) this.cacheItemConveyorTargetPosition();
+        if (!this.hasItemConveyorTargetPosition) return;
+
+        this.itemConveyorTween?.stop();
+        this.itemConveyorTween = null;
+        this.itemConveyor.active = false;
+        this.itemConveyor.setPosition(
+            this.itemConveyorTargetPosition.x + this.itemConveyorStartOffset.x,
+            this.itemConveyorTargetPosition.y + this.itemConveyorStartOffset.y,
+            this.itemConveyorTargetPosition.z + this.itemConveyorStartOffset.z,
+        );
+    }
+
+    private ShowItemConveyor(): void {
+        if (!this.itemConveyor?.isValid || !this.hasItemConveyorTargetPosition) return;
+
+        this.itemConveyorTween?.stop();
+        this.itemConveyor.active = true;
+        this.itemConveyorTween = tween(this.itemConveyor)
+            .to(this.itemConveyorFlyDuration, { position: this.itemConveyorTargetPosition }, { easing: 'backOut' })
+            .call(() => this.itemConveyorTween = null)
+            .start();
+    }
+
+    private MoveScreenTargetOnComplete(): void {
+        const target = ipm?.screenTarget;
+        if (!this.moveScreenTargetOnComplete || !target?.isValid) {
+            this.onCompleteScreen?.invoke();
+            return;
+        }
+
+        this.completedScreenTargetTween?.stop();
+        const destinationScale = new Vec3(
+            this.completedScreenTargetScale,
+            this.completedScreenTargetScale,
+            target.scale.z,
+        );
+        this.completedScreenTargetTween = tween(target)
+            .to(this.completedScreenTargetDuration, {
+                position: this.completedScreenTargetPosition,
+                scale: destinationScale,
+            }, { easing: 'sineInOut' })
+            .call(() => {
+                this.completedScreenTargetTween = null;
+                this.onCompleteScreen?.invoke();
+            })
+            .start();
+    }
+}

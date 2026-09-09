@@ -1,0 +1,10 @@
+tool_clean.png
+size:664,808
+filter:Linear,Linear
+broom
+bounds:2,2,314,578
+duster
+bounds:2,582,224,636
+rotate:90
+rag
+bounds:318,124,343,456

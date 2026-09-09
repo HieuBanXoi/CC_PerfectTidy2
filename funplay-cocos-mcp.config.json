@@ -1,0 +1,27 @@
+{
+  "host": "127.0.0.1",
+  "port": 24388,
+  "portMode": "project",
+  "clientConfigEntries": {
+    "codex": {
+      "serverName": "cocos-perfecttidy2-b70f2a",
+      "url": "http://127.0.0.1:24388/",
+      "configPath": "C:\\Users\\Admin\\.codex\\config.toml",
+      "projectIdentity": "b70f2a44c76fa52245b69a09"
+    }
+  },
+  "toolProfile": "core",
+  "enabledTools": [],
+  "disabledTools": [],
+  "enabledToolCategories": [],
+  "disabledToolCategories": [],
+  "enableSessions": false,
+  "enableConsoleLogging": true,
+  "executeJavascriptSafetyChecks": true,
+  "autostart": true,
+  "maxInteractionLogEntries": 50,
+  "lastClientTargetId": "codex",
+  "activeToolProfileName": "",
+  "savedToolProfiles": [],
+  "language": "auto"
+}
