@@ -20,7 +20,8 @@ export enum PoolType {
     HeartFX,
     BreakHeartFX,
     BlinkFX,
-    MergeVFX
+    MergeVFX,
+    HairFX
 }
 
 @ccclass

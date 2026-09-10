@@ -13,7 +13,8 @@
         "y": 0.7176470588235294,
         "z": 1,
         "w": 1
-      }
+      },
+      "image": "project://settings/LOGO.png"
     },
     "displayRatio": 0.82
   },
