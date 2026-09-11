@@ -4,7 +4,7 @@
     "totalTime": 500,
     "logo": {
       "type": "custom",
-      "image": "project://settings/splash.png"
+      "image": "project://settings/LOGO.png"
     },
     "background": {
       "type": "color",
@@ -14,9 +14,9 @@
         "z": 1,
         "w": 1
       },
-      "image": "project://settings/LOGO.png"
+      "image": "project://settings/logo.png"
     },
-    "displayRatio": 0.82
+    "displayRatio": 0.32
   },
   "textureCompressConfig": {
     "userPreset": {
@@ -25,7 +25,7 @@
         "options": {
           "web": {
             "png": {
-              "quality": 50
+              "quality": 80
             }
           }
         }

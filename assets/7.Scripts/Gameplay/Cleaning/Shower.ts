@@ -66,6 +66,9 @@ export class Shower extends Item {
     @property({ min: 0.1, tooltip: 'Thời gian fade của step 2 (giây). Chỉ tính khi đang giữ drag và brushPoint ở target step 2 (hoặc cleanTarget step 1 nếu target step 2 để trống).' })
     public requiredCleanTimeStep2: number = 2.0;
 
+    @property({ min: 1, max: 100, step: 1, tooltip: 'Phần trăm thời gian step 2 mà các soap particle phải dừng hết.' })
+    public step2SoapStopEndPercent: number = 70;
+
     @property({ type: [ParticleSystem2D], tooltip: 'Particle soap của step 2. Chúng sẽ stop lần lượt, phân đều trong Required Clean Time Step 2.' })
     public soapParticlesToStopStep2: ParticleSystem2D[] = [];
 
@@ -202,7 +205,7 @@ export class Shower extends Item {
         this.onDragEnd();
         // Nếu trong lượt kéo vừa rồi đã xịt trúng target thì triệt tiêu BreakHeart
         if (this._hasCleanedInCurrentDrag && this.itemDraggable) {
-            this.itemDraggable.consumeCurrentDropFail = true;
+            this.itemDraggable.ConsumeCurrentDropFail();
             if (this.itemDraggable.returnToStartOnDragFailed) {
                 this.itemDraggable.ReturnToStartWithoutHeart();
             }
@@ -249,6 +252,11 @@ export class Shower extends Item {
     /** Kiểm tra xem brushPoint có chạm vào cleanTarget hay không */
     private getCleanTarget(step: number): Node | null {
         return step === 1 ? (this.cleanTargetStep2 || this.cleanTarget) : this.cleanTarget;
+    }
+
+    /** Returns the target for the currently active shower step. */
+    public GetHandTutTarget(): Node | null {
+        return this.getCleanTarget(this._currentCleanStep);
     }
 
     private getStepCleanTime(step: number): number {
@@ -308,9 +316,17 @@ export class Shower extends Item {
 
     /** Stop các particle soap step 2 theo từng mốc thời gian được chia đều. */
     private updateStep2SoapParticles(progress: number): void {
+        const stopEndProgress = clamp01(
+            (Number.isFinite(this.step2SoapStopEndPercent) ? this.step2SoapStopEndPercent : 70) / 100,
+        );
+        const normalizedProgress = stopEndProgress >= 1
+            ? progress
+            : clamp01(progress / Math.max(0.01, stopEndProgress));
         const stopCount = Math.min(
             this.soapParticlesToStopStep2.length,
-            Math.floor(progress * this.soapParticlesToStopStep2.length),
+            progress >= stopEndProgress
+                ? this.soapParticlesToStopStep2.length
+                : Math.floor(normalizedProgress * this.soapParticlesToStopStep2.length),
         );
 
         while (this._stoppedSoapParticlesStep2 < stopCount) {

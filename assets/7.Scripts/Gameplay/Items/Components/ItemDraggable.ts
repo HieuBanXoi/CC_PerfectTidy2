@@ -298,6 +298,11 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
         this.ReturnToStart(false, true);
     }
 
+    /** Suppresses the generic failed-drop feedback for the current drag only. */
+    public ConsumeCurrentDropFail(): void {
+        this.consumeCurrentDropFail = true;
+    }
+
     /** Finds an active Item under the dropped item's center whose type matches targetItemType. */
     private FindMatchingDropTarget(): Node | null {
         if (this.targetItemType === ItemType.None) return null;

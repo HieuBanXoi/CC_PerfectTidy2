@@ -48,6 +48,9 @@ export class Item extends Ply_GameUnit {
     @property(Node)
     public knifePos: Node = null!;
 
+    @property({ type: Node, tooltip: 'Điểm spawn HeartFX. Để trống sẽ spawn tại node Item.' })
+    public spawnHeartPos: Node | null = null;
+
     @property({ min: 0 })
     public heartEffectScale: number = 1.0;
 
@@ -232,7 +235,7 @@ export class Item extends Ply_GameUnit {
         tween(this.node)
             .to(time, { eulerAngles: new Vec3(curEuler.x, curEuler.y, curEuler.z - 360) }, { easing: 'sineOut' })
             .call(() => {
-                Ply_SoundManager.Ins.PlayFx(FxType.Drop);
+                // Ply_SoundManager.Ins.PlayFx(FxType.Drop);
                 this.node.setParent(plateNode);
 
                 // Punch scale effect on plate
@@ -252,11 +255,12 @@ export class Item extends Ply_GameUnit {
     /** Spawns the success heart effect from the HeartFX pool. */
     public SpawnHeart() {
         this.TurnOffActiveEffect();
-        const spawnPos = this.GetEffectSpawnPosition();
+        const spawnNode = this.GetHeartSpawnNode();
+        const spawnPos = spawnNode.worldPosition.clone();
 
         const heartEffect = World.instance?.poolManager?.spawnType<HeartEffect>(PoolType.HeartFX, spawnPos);
         if (heartEffect) {
-            this.AttachEffectToItem(heartEffect);
+            this.AttachEffectToNode(heartEffect, spawnNode);
             this.CacheActiveEffect(heartEffect);
             heartEffect.PlaySpawnWithScale(this.heartEffectScale);
         }
@@ -330,11 +334,19 @@ export class Item extends Ply_GameUnit {
     }
 
     private AttachEffectToItem(effect: PoolMember): void {
-        if (effect.node.parent !== this.node) {
-            effect.node.setParent(this.node);
+        this.AttachEffectToNode(effect, this.node);
+    }
+
+    private AttachEffectToNode(effect: PoolMember, parent: Node): void {
+        if (effect.node.parent !== parent) {
+            effect.node.setParent(parent);
         }
         effect.node.setPosition(0, 0, 0);
         effect.node.setWorldRotationFromEuler(0, 0, 0);
+    }
+
+    private GetHeartSpawnNode(): Node {
+        return this.spawnHeartPos?.isValid ? this.spawnHeartPos : this.node;
     }
 
     protected GetEffectSpawnPosition(): Vec3 {

@@ -1,0 +1,21 @@
+<section class="page">
+  <header>
+    <div>
+      <h1>Audio to MP3 Converter</h1>
+      <p>Quét toàn bộ <code>assets/</code>, chọn audio cần đổi sang MP3 và thay thế asset gốc.</p>
+    </div>
+    <div id="status" class="status">Sẵn sàng</div>
+  </header>
+  <section class="toolbar">
+    <ui-button id="scan-button" class="primary">Quét audio</ui-button>
+    <ui-button id="select-all-button">Chọn tất cả</ui-button>
+    <ui-button id="select-none-button">Bỏ chọn</ui-button>
+    <label>Bitrate
+      <select id="bitrate"><option value="64">64 kbps</option><option value="96">96 kbps</option><option value="128" selected>128 kbps</option><option value="192">192 kbps</option></select>
+    </label>
+    <ui-button id="convert-button" class="danger">Chuyển các file đã chọn</ui-button>
+  </section>
+  <p class="warning">MP3 mới sẽ mang UUID của file gốc, nên reference trong Cocos được giữ nguyên. Nếu đã có MP3 trùng tên, file MP3 đó sẽ bị ghi đè.</p>
+  <section id="summary" class="summary">Nhấn “Quét audio” để bắt đầu.</section>
+  <section id="results" class="results empty">Chưa có file nào.</section>
+</section>

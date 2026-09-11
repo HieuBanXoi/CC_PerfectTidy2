@@ -1,8 +1,10 @@
-import { _decorator, Node, ParticleSystem2D, Sprite, UITransform, Vec3 } from 'cc';
+import { _decorator, Node, ParticleSystem2D, Sprite, UITransform, Vec3, Enum } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
 import { Ply_Event } from '../Framework/Ply_Event';
+import { Ply_SoundManager, FxType } from '../Framework/Ply_SoundManager';
+import { CleaningSoundMode } from './CleaningSoundMode';
 
 const { ccclass, property } = _decorator;
 
@@ -74,6 +76,21 @@ export class Blowdryer extends Item {
     @property({ min: 0.1, tooltip: 'Thời gian Brush Point cần ở trên mỗi target để làm mờ hết target đó (giây).' })
     public requiredFadeTime = 2;
 
+    @property({ tooltip: 'Play a sound when a blowdryer target is cleaned.' })
+    public playCutSound: boolean = true;
+
+    @property({ type: Enum(FxType), tooltip: 'Sound played when a blowdryer target is cleaned.' })
+    public cutFxType: FxType = FxType.Clean2;
+
+    @property({ tooltip: 'Play a loop while dragging the blowdryer.' })
+    public playDragSound: boolean = true;
+
+    @property({ type: Enum(FxType), tooltip: 'Loop sound while dragging the blowdryer.' })
+    public dragFxType: FxType = FxType.Clean1;
+
+    @property({ type: Enum(CleaningSoundMode), tooltip: 'When the drag loop sound is audible.' })
+    public dragSoundMode: CleaningSoundMode = CleaningSoundMode.Always;
+
     @property({ type: ItemCleanManager, tooltip: 'Manager điều phối lượt; Blowdryer chỉ hoạt động khi có onProcess.' })
     public itemCleanManager: ItemCleanManager | null = null;
 
@@ -85,6 +102,7 @@ export class Blowdryer extends Item {
 
     private targetStates: BlowdryerTargetState[] = [];
     private isDraggingBlowdryer = false;
+    private isDragSoundPlaying = false;
     private isBlowParticlesPlaying = false;
     private hasHitTargetInCurrentDrag = false;
     private brushWorldPosition = new Vec3();
@@ -116,6 +134,7 @@ export class Blowdryer extends Item {
         this.itemDraggable?.onDropFail.removeListener(this.boundOnDragEnd);
         this.itemDraggable?.onReturnToStartComplete.removeListener(this.boundOnDragEnd);
         this.isDraggingBlowdryer = false;
+        this.stopDragSound();
         this.stopBlowParticles();
     }
 
@@ -125,10 +144,17 @@ export class Blowdryer extends Item {
             .map(pair => new BlowdryerTargetState(pair.targetNode!, pair.revealSprite));
     }
 
+    /** Returns the next dirty area for HandTut's drag destination. */
+    public GetHandTutTarget(): Node | null {
+        return this.targetStates.find(state => !state.isFaded && state.target.activeInHierarchy)?.target ?? null;
+    }
+
     public onDragStart(): void {
         if (!this.isCurrentCleanManagerItem() || this.isDone) return;
 
         this.isDraggingBlowdryer = true;
+        this.startDragSound();
+        this.startBlowParticles();
         this.hasHitTargetInCurrentDrag = false;
         for (const state of this.targetStates) state.wasInsideInLastFrame = false;
         this.checkTargets(0);
@@ -136,6 +162,7 @@ export class Blowdryer extends Item {
 
     public onDragEnd(): void {
         this.isDraggingBlowdryer = false;
+        this.stopDragSound();
         this.stopBlowParticles();
         for (const state of this.targetStates) state.wasInsideInLastFrame = false;
     }
@@ -149,30 +176,61 @@ export class Blowdryer extends Item {
         this.checkTargets(dt);
     }
 
+    private startDragSound(isOverTarget = false): void {
+        if (!this.playDragSound || (this.dragSoundMode === CleaningSoundMode.TargetOnly && !isOverTarget)
+            || this.isDragSoundPlaying || !Ply_SoundManager.Ins) return;
+        Ply_SoundManager.Ins.PlayFxLoop(this.dragFxType);
+        this.isDragSoundPlaying = true;
+    }
+
+    private stopDragSound(): void {
+        if (!this.isDragSoundPlaying) return;
+        Ply_SoundManager.Ins?.StopFxLoop(this.dragFxType);
+        this.isDragSoundPlaying = false;
+    }
+
+    private updateDragSound(isOverTarget: boolean): void {
+        if (this.dragSoundMode === CleaningSoundMode.TargetOnly && !isOverTarget) {
+            this.stopDragSound();
+            return;
+        }
+        this.startDragSound(isOverTarget);
+    }
+
     private checkTargets(dt: number): void {
         const brush = this.brushPoint || this.node;
         brush.getWorldPosition(this.brushWorldPosition);
-        let isInsideAnyTarget = false;
-
+        let isOverAnyTarget = false;
         for (const state of this.targetStates) {
             if (state.isFaded || !state.target.isValid || !state.target.activeInHierarchy) continue;
 
             const isInside = this.isBrushInsideTarget(state);
-            if (isInside) {
-                isInsideAnyTarget = true;
-                this.updateTargetFade(state, dt);
-            }
+            if (isInside) isOverAnyTarget = true;
+            if (isInside) this.updateTargetFade(state, dt);
             state.wasInsideInLastFrame = isInside;
         }
+        this.updateDragSound(isOverAnyTarget);
 
-        if (this.isDone) this.stopBlowParticles();
-        else if (isInsideAnyTarget) this.startBlowParticles();
-        else this.stopBlowParticles();
+        // The dryer effect follows the drag session, not target contact.
+        // Target contact only controls cleaning progress above.
+        if (this.isDraggingBlowdryer && !this.isDone) this.startBlowParticles();
     }
 
-    /** Only count clean time while Brush Point is inside the target's own UI area. */
+    /**
+     * Only count clean time while the Brush Point UITransform overlaps the
+     * target UITransform. This allows the brush graphic to cover a target
+     * naturally instead of requiring their pivots to be nearly identical.
+     */
     private isBrushInsideTarget(state: BlowdryerTargetState): boolean {
+        const brush = this.brushPoint || this.node;
+        const brushTransform = brush.getComponent(UITransform);
         const transform = state.transform && state.transform.isValid ? state.transform : null;
+        if (brushTransform && transform) {
+            const brushRect = brushTransform.getBoundingBoxToWorld();
+            const targetRect = transform.getBoundingBoxToWorld();
+            return brushRect.intersects(targetRect);
+        }
+
         if (transform) {
             transform.convertToNodeSpaceAR(this.brushWorldPosition, this.brushLocalPosition);
             const left = -transform.anchorX * transform.width;
@@ -216,13 +274,13 @@ export class Blowdryer extends Item {
     private finishTargetFadeIfNeeded(state: BlowdryerTargetState, fadeProgress: number): void {
         if (fadeProgress < 1 || state.isFaded || !state.target.isValid) return;
 
-        state.isFaded = true;
-        state.target.active = false;
-        this.onTargetFaded.invoke();
+            state.isFaded = true;
+            state.target.active = false;
+            if (this.playCutSound) Ply_SoundManager.Ins?.PlayFx(this.cutFxType);
+            this.onTargetFaded.invoke();
         if (!this.targetStates.every(target => target.isFaded)) return;
 
         this.isDone = true;
-        this.stopBlowParticles();
         this.onAllTargetsFaded.invoke();
         (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
     }

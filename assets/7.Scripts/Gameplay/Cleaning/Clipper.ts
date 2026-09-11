@@ -7,6 +7,7 @@ import { HairEffect } from '../Effects/HairEffect';
 import { Ply_SoundManager, FxType } from '../Framework/Ply_SoundManager';
 import { Ply_Event } from '../Framework/Ply_Event';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
+import { CleaningSoundMode } from './CleaningSoundMode';
 
 const { ccclass, property } = _decorator;
 
@@ -49,6 +50,15 @@ export class Clipper extends Item {
     @property({ type: Enum(FxType), tooltip: 'Loại âm thanh khi cắt trúng' })
     public cutFxType: FxType = FxType.Clean2;
 
+    @property({ tooltip: 'Loop sound while dragging the clipper.' })
+    public playDragSound: boolean = true;
+
+    @property({ type: Enum(FxType), tooltip: 'Loop sound type while dragging.' })
+    public dragFxType: FxType = FxType.Clean1;
+
+    @property({ type: Enum(CleaningSoundMode), tooltip: 'When the drag loop sound is audible.' })
+    public dragSoundMode: CleaningSoundMode = CleaningSoundMode.Always;
+
     @property({ type: ItemCleanManager, tooltip: 'Manager quản lý thứ tự các item làm sạch (sẽ tự động gọi ItemCleanDone khi cắt sạch lông)' })
     public itemCleanManager: ItemCleanManager | null = null;
 
@@ -61,6 +71,7 @@ export class Clipper extends Item {
     private _targetStates: HairTargetState[] = [];
     private _isDragging: boolean = false;
     private _hasCutInCurrentDrag: boolean = false;
+    private _isPlayingDragSound: boolean = false;
     private _tempWorldPos: Vec3 = new Vec3();
     private _tempTargetPos: Vec3 = new Vec3();
 
@@ -98,6 +109,7 @@ export class Clipper extends Item {
             this.itemDraggable.onReturnToStartComplete.removeListener(this._boundOnDragEnd);
         }
         this._isDragging = false;
+        this.stopDragSound();
     }
 
     /**
@@ -112,12 +124,18 @@ export class Clipper extends Item {
         }
     }
 
+    /** Returns the next uncut hair for HandTut's drag destination. */
+    public GetHandTutTarget(): Node | null {
+        return this._targetStates.find(state => !state.isCut && state.node.activeInHierarchy)?.node ?? null;
+    }
+
     public onDragStart(): void {
         if (!this.isCurrentCleanManagerItem()) {
             return;
         }
         this._isDragging = true;
         this._hasCutInCurrentDrag = false;
+        this.startDragSound();
         // Reset trạng thái hover/inside của frame trước khi bắt đầu drag mới
         for (const state of this._targetStates) {
             state.wasInsideInLastFrame = false;
@@ -127,6 +145,7 @@ export class Clipper extends Item {
 
     public onDragEnd(): void {
         this._isDragging = false;
+        this.stopDragSound();
         for (const state of this._targetStates) {
             state.wasInsideInLastFrame = false;
         }
@@ -136,7 +155,7 @@ export class Clipper extends Item {
         this.onDragEnd();
         // Nếu trong lượt kéo này đã cắt được lông thì triệt tiêu BreakHeart của ItemDraggable
         if (this._hasCutInCurrentDrag && this.itemDraggable) {
-            this.itemDraggable.consumeCurrentDropFail = true;
+            this.itemDraggable.ConsumeCurrentDropFail();
             if (this.itemDraggable.returnToStartOnDragFailed) {
                 this.itemDraggable.ReturnToStartWithoutHeart();
             }
@@ -173,11 +192,25 @@ export class Clipper extends Item {
     /**
      * Kiểm tra vị trí brushPoint so với các sợi lông
      */
+    private startDragSound(isOverTarget = false): void {
+        if (!this.playDragSound || (this.dragSoundMode === CleaningSoundMode.TargetOnly && !isOverTarget)
+            || this._isPlayingDragSound || !Ply_SoundManager.Ins) return;
+        Ply_SoundManager.Ins.PlayFxLoop(this.dragFxType);
+        this._isPlayingDragSound = true;
+    }
+
+    private stopDragSound(): void {
+        if (!this._isPlayingDragSound) return;
+        Ply_SoundManager.Ins?.StopFxLoop(this.dragFxType);
+        this._isPlayingDragSound = false;
+    }
+
     private checkCutHairs(): void {
         const brush = this.brushPoint ? this.brushPoint : this.node;
         brush.getWorldPosition(this._tempWorldPos);
 
         const radiusSq = this.cutRadius * this.cutRadius;
+        let isOverAnyTarget = false;
 
         for (const state of this._targetStates) {
             if (state.isCut || !state.node || !state.node.isValid || !state.node.activeInHierarchy) {
@@ -190,6 +223,7 @@ export class Clipper extends Item {
             const distSq = dx * dx + dy * dy;
 
             const isInside = distSq <= radiusSq;
+            if (isInside) isOverAnyTarget = true;
 
             // Nhận diện lần kéo chạm vào lông (chuyển trạng thái từ ngoài vào trong)
             if (isInside && !state.wasInsideInLastFrame) {
@@ -198,6 +232,15 @@ export class Clipper extends Item {
 
             state.wasInsideInLastFrame = isInside;
         }
+        this.updateDragSound(isOverAnyTarget);
+    }
+
+    private updateDragSound(isOverTarget: boolean): void {
+        if (this.dragSoundMode === CleaningSoundMode.TargetOnly && !isOverTarget) {
+            this.stopDragSound();
+            return;
+        }
+        this.startDragSound(isOverTarget);
     }
 
     /**

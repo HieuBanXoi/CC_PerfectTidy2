@@ -1,4 +1,4 @@
-import { _decorator, Enum, input, Input, Node, Tween, tween, UIOpacity, Vec3 } from 'cc';
+import { _decorator, Color, Enum, input, Input, Node, Sprite, Tween, tween, Vec3 } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemType } from '../Items/Components/ItemType';
 import { ItemStirring } from '../Items/Components/ItemStirring';
@@ -13,6 +13,16 @@ export enum TypeHind {
     Stir,
 }
 Enum(TypeHind);
+
+/** Optional target collections exposed by the cleaning-item components. */
+interface HandTutTargetProvider extends Item {
+    GetHandTutTarget?: () => Node | null;
+    cleanTarget?: Node | null;
+    cleanTargetStep2?: Node | null;
+    targetNodes?: Node[];
+    hairTargets?: Node[];
+    targets?: Array<{ targetNode?: Node | null }>;
+}
 
 /**
  * Idle guidance for the currently playable cooking action.
@@ -41,6 +51,8 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     @property({ min: 0.01 }) public moveDuration = 1.2;
     @property({ min: 0.01 }) public clickScaleDuration = 0.35;
     @property({ min: 0 }) public waitAtEndDuration = 0.2;
+    @property({ min: 0.01, tooltip: 'Thời gian mờ dần của tay khi chạm đích trước khi lặp lại.' })
+    public hintFadeOutDuration = 0.25;
     @property public clickScaleMultiplier = 1.25;
 
     @property({type:Item})
@@ -57,21 +69,33 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     private isScreenNavigating = false;
     private shownCount = 0;
     private hasShownFirstHint = false;
+    // Optional one-shot destination for the first hint of a specific item.
+    // ItemCleanManager uses this for Clipper so its opening gesture points at
+    // the cleaned object, while subsequent hints use the tool's hair target.
+    private firstHintItem: Item | null = null;
+    private firstHintTarget: Node | null = null;
     private consecutiveDropFails = 0;
     private forceNoDelay = false;
     private handDefaultScale = new Vec3(1, 1, 1);
     private handDefaultAlpha = 255;
-    private handOpacity: UIOpacity | null = null;
+    @property({ type: Sprite, tooltip: 'Optional Sprite component on the hand node for alpha fading.' })
+    public handSprite: Sprite | null = null;
+    private handDefaultColor = new Color(255, 255, 255, 255);
     private currentHintToken = 0;
     private activeAuxTween: Tween<object> | null = null;
+    private activeFadeTween: Tween<object> | null = null;
     private boundItems = new Set<Item>();
 
     protected onLoad(): void {
         super.onLoad();
         if (this.handNode) {
             Vec3.copy(this.handDefaultScale, this.handNode.scale);
-            this.handOpacity = this.handNode.getComponent(UIOpacity);
-            this.handDefaultAlpha = this.handOpacity?.opacity ?? 255;
+            if (this.handSprite) {
+                this.handSprite = this.handNode.getComponentInChildren(Sprite);
+                
+            }
+            this.handDefaultColor = this.handSprite.color.clone();
+                this.handDefaultAlpha = this.handDefaultColor.a;
             this.handNode.active = false;
         }
 
@@ -128,6 +152,46 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         this.forceNoDelay = true;
         this.StartHandTut();
         this.showNextHandTut();
+    }
+
+    /**
+     * Replaces the tutorial order with the active gameplay sequence.
+     * Duplicate entries are preserved because a single tool can be used for
+     * more than one sequential step.
+     */
+    public SetTutorialItems(items: readonly Item[]): void {
+        this.items = items.filter((item): item is Item => !!item && item.isValid);
+        this.bindConfiguredItems();
+
+        if (this.currentItemHandTut && !this.items.includes(this.currentItemHandTut)) {
+            this.hideHandTut();
+        }
+    }
+
+    /**
+     * Sets the drag destination used by the hand hint for the supplied active
+     * item. Cleaning tools expose their actionable areas as target collections;
+     * use the first visible target because ItemMoveToTarget has one default
+     * destination at a time.
+     */
+    public SetDefaultTargetForItem(item: Item | null): void {
+        const moveToTarget = item?.itemMoveToTarget;
+        if (!item || !moveToTarget) return;
+
+        const preferredTarget = this.firstHintItem === item && this.isUsableTarget(this.firstHintTarget)
+            ? this.firstHintTarget
+            : null;
+        const target = preferredTarget ?? this.getActiveTarget(item);
+        if (target) moveToTarget.defaultTarget = target;
+    }
+
+    /**
+     * Overrides one tutorial destination for the next hint of an item. The
+     * override is consumed as soon as that item's hint is shown.
+     */
+    public SetFirstTutorialTarget(item: Item | null, target: Node | null): void {
+        this.firstHintItem = item?.isValid ? item : null;
+        this.firstHintTarget = target?.isValid ? target : null;
     }
 
     /** Stops the idle timer and hides the current hint during a phase transition. */
@@ -217,18 +281,37 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
             return;
         }
 
+        this.SetDefaultTargetForItem(item);
+
         if (this.isClickableReady(item)) {
             this.playClickHint(item.node);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Click;
+            this.consumeFirstTutorialTarget(item);
         } else if (this.isDraggableReady(item) && this.hasValidDragTarget(item)) {
             this.playMoveHint(item.node, item.itemMoveToTarget!.defaultTarget);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Drag;
+            this.consumeFirstTutorialTarget(item);
         } else if (this.isStirringReady(item)) {
             this.playStirringHint(item.itemStirring!);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Stir;
+            this.consumeFirstTutorialTarget(item);
+        }
+    }
+
+    private consumeFirstTutorialTarget(item: Item): void {
+        if (this.firstHintItem !== item) return;
+        this.firstHintItem = null;
+        this.firstHintTarget = null;
+
+        // The one-shot destination is for the visual hint only. Restore the
+        // component's real cleaning target immediately so gameplay validation
+        // continues to use Clipper's current hair target.
+        const actualTarget = this.getActiveTarget(item);
+        if (actualTarget && item.itemMoveToTarget) {
+            item.itemMoveToTarget.defaultTarget = actualTarget;
         }
     }
 
@@ -250,7 +333,10 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     }
 
     private canShowTutorialForItem(item: Item): boolean {
-        if (!item || item.isDone || !item.node.activeInHierarchy) return false;
+        // A repeated sequence entry can be marked done after its first step,
+        // then become the active item again for a later step.  Its onProcess
+        // flag is the authoritative signal that it is ready for that turn.
+        if (!item || (item.isDone && !item.onProcess) || !item.node.activeInHierarchy) return false;
 
         // Draggable items with no target type are never tutorial candidates,
         // even if a default move target happens to be assigned.
@@ -284,6 +370,35 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         return !!targetItem && targetItem.itemType === draggable.targetItemType;
     }
 
+    /** Finds the target relevant to the item's current cleaning turn. */
+    private getActiveTarget(item: Item): Node | null {
+        const provider = item as HandTutTargetProvider;
+
+        const componentTarget = provider.GetHandTutTarget?.();
+        if (this.isUsableTarget(componentTarget)) return componentTarget;
+
+        // Shower is intentionally present twice in ItemCleanManager. Its
+        // completed first turn means the second target should be used.
+        if (provider.cleanTarget) {
+            const showerTarget = item.isDone && item.onProcess
+                ? provider.cleanTargetStep2 || provider.cleanTarget
+                : provider.cleanTarget;
+            if (this.isUsableTarget(showerTarget)) return showerTarget;
+        }
+
+        const collectionTarget = [
+            ...(provider.targetNodes ?? []),
+            ...(provider.hairTargets ?? []),
+            ...(provider.targets ?? []).map(target => target?.targetNode ?? null),
+        ].find(target => this.isUsableTarget(target));
+
+        return collectionTarget ?? null;
+    }
+
+    private isUsableTarget(target: Node | null | undefined): target is Node {
+        return !!target && target.isValid && target.activeInHierarchy;
+    }
+
     private isStirringReady(item: Item): boolean {
         return !!item.itemStirring?.enabled && !item.itemStirring.IsDone;
     }
@@ -312,12 +427,35 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
             this.setHandAlpha(this.handDefaultAlpha);
             tween(this.handNode)
                 .to(this.moveDuration, { worldPosition: endPosition }, { easing: 'sineInOut' })
-                .call(() => this.setHandAlpha(0))
-                .delay(this.waitAtEndDuration)
-                .call(loop)
+                .call(() => this.fadeOutThenLoop(token, loop))
                 .start();
         };
         loop();
+    }
+
+    private fadeOutThenLoop(token: number, loop: () => void): void {
+        if (!this.isHintCurrent(token)) return;
+
+        if (!this.handSprite) {
+            this.setHandAlpha(0);
+            this.scheduleOnce(() => {
+                if (this.isHintCurrent(token)) loop();
+            }, this.waitAtEndDuration);
+            return;
+        }
+
+        const fadeState = { alpha: this.handDefaultAlpha };
+        this.activeFadeTween = tween(fadeState)
+            .to(this.hintFadeOutDuration, { alpha: 0 }, {
+                easing: 'sineIn',
+                onUpdate: () => this.setHandAlpha(fadeState.alpha),
+            })
+            .delay(this.waitAtEndDuration)
+            .call(() => {
+                this.activeFadeTween = null;
+                if (this.isHintCurrent(token)) loop();
+            })
+            .start();
     }
 
     private playStirringHint(stirring: ItemStirring): void {
@@ -361,6 +499,8 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         this.TypeHind = TypeHind.None;
         this.activeAuxTween?.stop();
         this.activeAuxTween = null;
+        this.activeFadeTween?.stop();
+        this.activeFadeTween = null;
         if (!this.handNode) return;
         Tween.stopAllByTarget(this.handNode);
         this.handNode.setScale(this.handDefaultScale);
@@ -373,7 +513,10 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     }
 
     private setHandAlpha(alpha: number): void {
-        if (this.handOpacity) this.handOpacity.opacity = alpha;
+        if (!this.handSprite) return;
+        const color = this.handSprite.color;
+        color.set(this.handDefaultColor.r, this.handDefaultColor.g, this.handDefaultColor.b, alpha);
+        this.handSprite.color = color;
     }
 
     private getCurrentDelay(): number {
@@ -391,7 +534,10 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
 
     private removeCompletedItems(): void {
         for (let i = this.items.length - 1; i >= 0; i--) {
-            if (!this.items[i] || this.items[i].isDone) this.items.splice(i, 1);
+            // Keep completed references so duplicate entries can be reused by
+            // a later ItemCleanManager turn. Candidate filtering above skips
+            // completed items unless they are the current onProcess item.
+            if (!this.items[i] || !this.items[i].isValid) this.items.splice(i, 1);
         }
     }
 }

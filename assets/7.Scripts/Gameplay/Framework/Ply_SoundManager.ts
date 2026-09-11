@@ -12,7 +12,15 @@ export enum FxType {
     Clean2,
     StarSpark,
     PlaceTrash,
-    CleanItemAppear
+    CleanItemAppear,
+    Clipper,
+    HairCut,
+    Towel,
+    Cat,
+    Soap,
+    SoapClean,
+    BlowDryer,
+    WaterStream,
     
 }
 Enum(FxType);

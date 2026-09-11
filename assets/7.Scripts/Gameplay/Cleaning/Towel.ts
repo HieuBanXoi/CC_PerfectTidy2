@@ -1,8 +1,10 @@
-import { _decorator, Node, Sprite, UITransform, Vec3 } from 'cc';
+import { _decorator, Node, Sprite, UITransform, Vec3, Enum } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
 import { Ply_Event } from '../Framework/Ply_Event';
+import { Ply_SoundManager, FxType } from '../Framework/Ply_SoundManager';
+import { CleaningSoundMode } from './CleaningSoundMode';
 
 const { ccclass, property } = _decorator;
 
@@ -41,6 +43,21 @@ export class Towel extends Item {
     @property({ min: 0.1, tooltip: 'Thời gian Brush Point cần ở trên mỗi target để lau mờ hoàn toàn (giây).' })
     public requiredFadeTime = 2;
 
+    @property({ tooltip: 'Play a sound when a towel target is cleaned.' })
+    public playCutSound: boolean = true;
+
+    @property({ type: Enum(FxType), tooltip: 'Sound played when a towel target is cleaned.' })
+    public cutFxType: FxType = FxType.Clean2;
+
+    @property({ tooltip: 'Play a loop while dragging the towel.' })
+    public playDragSound: boolean = true;
+
+    @property({ type: Enum(FxType), tooltip: 'Loop sound while dragging the towel.' })
+    public dragFxType: FxType = FxType.Clean1;
+
+    @property({ type: Enum(CleaningSoundMode), tooltip: 'When the drag loop sound is audible.' })
+    public dragSoundMode: CleaningSoundMode = CleaningSoundMode.Always;
+
     @property({ type: ItemCleanManager, tooltip: 'Manager điều phối lượt; Towel chỉ lau khi có onProcess.' })
     public itemCleanManager: ItemCleanManager | null = null;
 
@@ -52,6 +69,7 @@ export class Towel extends Item {
 
     private targetStates: TowelTargetState[] = [];
     private isDraggingTowel = false;
+    private isDragSoundPlaying = false;
     private hasWipedTargetInCurrentDrag = false;
     private brushWorldPosition = new Vec3();
     private targetWorldPosition = new Vec3();
@@ -81,6 +99,7 @@ export class Towel extends Item {
         this.itemDraggable?.onDropFail.removeListener(this.boundOnDragEnd);
         this.itemDraggable?.onReturnToStartComplete.removeListener(this.boundOnDragEnd);
         this.isDraggingTowel = false;
+        this.stopDragSound();
     }
 
     public initializeTargets(): void {
@@ -89,15 +108,22 @@ export class Towel extends Item {
             .map(node => new TowelTargetState(node));
     }
 
+    /** Returns the next dirty sprite for HandTut's drag destination. */
+    public GetHandTutTarget(): Node | null {
+        return this.targetStates.find(state => !state.isFaded && state.node.activeInHierarchy)?.node ?? null;
+    }
+
     public onDragStart(): void {
         if (!this.isCurrentCleanManagerItem() || this.isDone) return;
 
         this.isDraggingTowel = true;
+        this.startDragSound();
         this.hasWipedTargetInCurrentDrag = false;
     }
 
     public onDragEnd(): void {
         this.isDraggingTowel = false;
+        this.stopDragSound();
     }
 
     protected lateUpdate(dt: number): void {
@@ -109,17 +135,43 @@ export class Towel extends Item {
         this.checkTargets(dt);
     }
 
+    private startDragSound(isOverTarget = false): void {
+        if (!this.playDragSound || (this.dragSoundMode === CleaningSoundMode.TargetOnly && !isOverTarget)
+            || this.isDragSoundPlaying || !Ply_SoundManager.Ins) return;
+        Ply_SoundManager.Ins.PlayFxLoop(this.dragFxType);
+        this.isDragSoundPlaying = true;
+    }
+
+    private stopDragSound(): void {
+        if (!this.isDragSoundPlaying) return;
+        Ply_SoundManager.Ins?.StopFxLoop(this.dragFxType);
+        this.isDragSoundPlaying = false;
+    }
+
+    private updateDragSound(isOverTarget: boolean): void {
+        if (this.dragSoundMode === CleaningSoundMode.TargetOnly && !isOverTarget) {
+            this.stopDragSound();
+            return;
+        }
+        this.startDragSound(isOverTarget);
+    }
+
     private checkTargets(dt: number): void {
         const brush = this.brushPoint || this.node;
         brush.getWorldPosition(this.brushWorldPosition);
 
         // dt không hợp lệ hoặc quá lớn sẽ khiến progress nhảy thẳng lên 1 ngay frame đầu chạm target.
         const step = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), MAX_FADE_STEP) : 0;
+        let isOverAnyTarget = false;
 
         for (const state of this.targetStates) {
             if (state.isFaded || !state.node.isValid || !state.node.activeInHierarchy) continue;
-            if (this.isBrushOverTarget(state)) this.updateTargetFade(state, step);
+            if (this.isBrushOverTarget(state)) {
+                isOverAnyTarget = true;
+                this.updateTargetFade(state, step);
+            }
         }
+        this.updateDragSound(isOverAnyTarget);
     }
 
     /**
@@ -163,6 +215,7 @@ export class Towel extends Item {
         if (progress >= 1 && state.node.isValid) {
             state.isFaded = true;
             state.node.active = false;
+            if (this.playCutSound) Ply_SoundManager.Ins?.PlayFx(this.cutFxType);
             this.onTargetFaded.invoke();
             this.tryCompleteTowel();
         }
