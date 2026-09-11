@@ -87,6 +87,12 @@ export class Shower extends Item {
     @property({ type: Ply_Event, tooltip: 'Sự kiện khi hoàn thành việc xịt sạch' })
     public onShowerComplete: Ply_Event = new Ply_Event();
 
+    @property({ min: 1, max: 100, step: 1, tooltip: 'Phần trăm thời gian step 2 để bắn On Step2 Progress Reached (mặc định 50%).' })
+    public step2ProgressEventPercent: number = 50;
+
+    @property({ type: Ply_Event, tooltip: 'Sự kiện bắn đúng một lần khi step 2 đạt Step2 Progress Event Percent thời gian.' })
+    public onStep2ProgressReached: Ply_Event = new Ply_Event();
+
     private _isDragging: boolean = false;
     private _isWaterPlaying: boolean = false;
     private _isPlayingSound: boolean = false;
@@ -95,6 +101,7 @@ export class Shower extends Item {
     private _currentCleanStep: number = 0;
     private _isCompleted: boolean = false;
     private _stoppedSoapParticlesStep2: number = 0;
+    private _hasFiredStep2ProgressEvent: boolean = false;
     private _isBrushInsideCleanTarget: boolean = false;
     private _hasActivatedWetParticle: boolean = false;
 
@@ -237,6 +244,7 @@ export class Shower extends Item {
             this.updateSpritesAlpha(this._currentCleanStep, progress);
             if (this._currentCleanStep === 1) {
                 this.updateStep2SoapParticles(progress);
+                this.fireStep2ProgressEventOnce(progress);
             }
 
             // Kiểm tra hoàn thành
@@ -337,6 +345,19 @@ export class Shower extends Item {
         }
     }
 
+    /** Bắn onStep2ProgressReached đúng một lần khi step 2 chạm mốc phần trăm cấu hình. */
+    private fireStep2ProgressEventOnce(progress: number): void {
+        if (this._hasFiredStep2ProgressEvent) return;
+
+        const threshold = clamp01(
+            (Number.isFinite(this.step2ProgressEventPercent) ? this.step2ProgressEventPercent : 50) / 100,
+        );
+        if (progress < threshold) return;
+
+        this._hasFiredStep2ProgressEvent = true;
+        this.onStep2ProgressReached.invoke();
+    }
+
     /** Bắn trigger đúng một lần mỗi khi brush đổi trạng thái vào/ra vùng clean. */
     private updateCleanTargetAnimationState(isInside: boolean): void {
         if (this._isBrushInsideCleanTarget === isInside) return;
@@ -359,6 +380,7 @@ export class Shower extends Item {
             this._currentCleanStep = 1;
             this._cleanedTime = 0;
             this._stoppedSoapParticlesStep2 = 0;
+            this._hasFiredStep2ProgressEvent = false;
             this._isCompleted = true;
             this.isDone = true;
             this.stopWaterParticles();

@@ -72,6 +72,9 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     // Optional one-shot destination for the first hint of a specific item.
     // ItemCleanManager uses this for Clipper so its opening gesture points at
     // the cleaned object, while subsequent hints use the tool's hair target.
+    // It is consumed on the player's first interaction with that item, not on
+    // render: the first render happens on frame 1 and is usually hidden by the
+    // first tap before the player has seen it.
     private firstHintItem: Item | null = null;
     private firstHintTarget: Node | null = null;
     private consecutiveDropFails = 0;
@@ -218,6 +221,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     public ItemDone(item: Item): void {
         const index = this.items.indexOf(item);
         if (index >= 0) this.items.splice(index, 1);
+        this.consumeFirstTutorialTarget(item);
         this.RegisterCorrectAction();
     }
 
@@ -256,14 +260,15 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
             if (!item || this.boundItems.has(item)) continue;
             this.boundItems.add(item);
             item.itemClickable?.onClick.addListener(() => this.RegisterCorrectAction());
-            item.itemDraggable?.onBeginDrag.addListener(() => this.OnGameplayDragBegin());
+            item.itemDraggable?.onBeginDrag.addListener(() => this.OnGameplayDragBegin(item));
             item.itemDraggable?.onDropSuccess.addListener(() => this.RegisterCorrectAction());
             item.itemDraggable?.onDropFail.addListener(() => this.RegisterBreakHeartDropFail());
             item.itemStirring?.onStirComplete.addListener(() => this.RegisterCorrectAction());
         }
     }
 
-    private OnGameplayDragBegin(): void {
+    private OnGameplayDragBegin(item: Item): void {
+        this.consumeFirstTutorialTarget(item);
         this.isGameplayDragging = true;
         this.hideHandTut();
         this.resetIdleTimer();
@@ -287,17 +292,14 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
             this.playClickHint(item.node);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Click;
-            this.consumeFirstTutorialTarget(item);
         } else if (this.isDraggableReady(item) && this.hasValidDragTarget(item)) {
             this.playMoveHint(item.node, item.itemMoveToTarget!.defaultTarget);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Drag;
-            this.consumeFirstTutorialTarget(item);
         } else if (this.isStirringReady(item)) {
             this.playStirringHint(item.itemStirring!);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Stir;
-            this.consumeFirstTutorialTarget(item);
         }
     }
 
@@ -306,9 +308,9 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         this.firstHintItem = null;
         this.firstHintTarget = null;
 
-        // The one-shot destination is for the visual hint only. Restore the
-        // component's real cleaning target immediately so gameplay validation
-        // continues to use Clipper's current hair target.
+        // The one-shot destination is for the visual hint only. Once the
+        // player has started using the item, restore the component's real
+        // cleaning target so later hints use Clipper's current hair target.
         const actualTarget = this.getActiveTarget(item);
         if (actualTarget && item.itemMoveToTarget) {
             item.itemMoveToTarget.defaultTarget = actualTarget;
@@ -419,14 +421,14 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
 
     private playMoveHint(start: Node, end: Node): void {
         const token = this.prepareHand(start.worldPosition);
-        const startPosition = start.worldPosition.clone();
-        const endPosition = end.worldPosition.clone();
+        // Re-read both positions every loop: the first hint starts on frame 1,
+        // before layout/zoom has settled, and items can move while it repeats.
         const loop = () => {
-            if (!this.isHintCurrent(token)) return;
-            this.handNode.setWorldPosition(startPosition);
+            if (!this.isHintCurrent(token) || !start.isValid || !end.isValid) return;
+            this.handNode.setWorldPosition(start.worldPosition);
             this.setHandAlpha(this.handDefaultAlpha);
             tween(this.handNode)
-                .to(this.moveDuration, { worldPosition: endPosition }, { easing: 'sineInOut' })
+                .to(this.moveDuration, { worldPosition: end.worldPosition.clone() }, { easing: 'sineInOut' })
                 .call(() => this.fadeOutThenLoop(token, loop))
                 .start();
         };
