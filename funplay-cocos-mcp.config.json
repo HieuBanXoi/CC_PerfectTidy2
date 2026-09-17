@@ -8,6 +8,12 @@
       "url": "http://127.0.0.1:24388/",
       "configPath": "C:\\Users\\Admin\\.codex\\config.toml",
       "projectIdentity": "b70f2a44c76fa52245b69a09"
+    },
+    "claude_code": {
+      "serverName": "cocos-perfecttidy2-b70f2a",
+      "url": "http://127.0.0.1:24388/",
+      "configPath": "C:\\Users\\Admin\\.claude.json",
+      "projectIdentity": "b70f2a44c76fa52245b69a09"
     }
   },
   "toolProfile": "core",
@@ -20,7 +26,7 @@
   "executeJavascriptSafetyChecks": true,
   "autostart": true,
   "maxInteractionLogEntries": 50,
-  "lastClientTargetId": "codex",
+  "lastClientTargetId": "claude_code",
   "activeToolProfileName": "",
   "savedToolProfiles": [],
   "language": "auto"

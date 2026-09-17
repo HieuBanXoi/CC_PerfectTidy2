@@ -30,15 +30,6 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     @property({ tooltip: 'Spawn a cloud effect when the next cleaning item appears.' })
     public spawnCloudOnItemShow = true;
 
-    @property({ type: Node, tooltip: 'Node that flies up after every cleaning item has been completed.' })
-    public itemConveyor: Node | null = null;
-
-    @property({ type: Vec3, tooltip: 'Local offset below the configured Item Conveyor position before it flies in.' })
-    public itemConveyorStartOffset = new Vec3(0, -1000, 0);
-
-    @property({ min: 0.01, tooltip: 'Seconds used for Item Conveyor to fly into its configured position.' })
-    public itemConveyorFlyDuration = 0.5;
-
     @property({ tooltip: 'Move and zoom InputManager screenTarget after all cleaning items are complete.' })
     public moveScreenTargetOnComplete = false;
 
@@ -62,18 +53,13 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
 
     private readonly itemScales = new Map<Component, Vec3>();
     private activeTween: Tween<Node> | null = null;
-    private itemConveyorTween: Tween<Node> | null = null;
     private completedScreenTargetTween: Tween<Node> | null = null;
-    private itemConveyorTargetPosition = new Vec3();
-    private hasItemConveyorTargetPosition = false;
     private isTransitioning = false;
     private hasCompletedSequence = false;
 
     protected onLoad(): void {
         super.onLoad();
         this.cacheItemScales();
-        this.cacheItemConveyorTargetPosition();
-        this.resetItemConveyor();
         this.setAllItemsInactive();
     }
 
@@ -90,7 +76,6 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     public StartItems(): void {
         this.stopActiveTween();
         this.cacheItemScales();
-        this.resetItemConveyor();
         this.setAllItemsInactive();
         this.currentItemIndex = -1;
         this.isTransitioning = false;
@@ -137,7 +122,6 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         if (nextIndex >= this.items.length) {
             this.currentItemIndex = -1;
             this.hasCompletedSequence = true;
-            this.ShowItemConveyor();
             this.MoveScreenTargetOnComplete();
             this.onAllItemsCleaned?.invoke();
             return;
@@ -209,38 +193,6 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     public resetInEditor(): void {
         if (!this.onAllItemsCleaned) this.onAllItemsCleaned = new Ply_Event();
         if (!this.onCompleteScreen) this.onCompleteScreen = new Ply_Event();
-    }
-
-    private cacheItemConveyorTargetPosition(): void {
-        if (!this.itemConveyor?.isValid) return;
-        Vec3.copy(this.itemConveyorTargetPosition, this.itemConveyor.position);
-        this.hasItemConveyorTargetPosition = true;
-    }
-
-    private resetItemConveyor(): void {
-        if (!this.itemConveyor?.isValid) return;
-        if (!this.hasItemConveyorTargetPosition) this.cacheItemConveyorTargetPosition();
-        if (!this.hasItemConveyorTargetPosition) return;
-
-        this.itemConveyorTween?.stop();
-        this.itemConveyorTween = null;
-        this.itemConveyor.active = false;
-        this.itemConveyor.setPosition(
-            this.itemConveyorTargetPosition.x + this.itemConveyorStartOffset.x,
-            this.itemConveyorTargetPosition.y + this.itemConveyorStartOffset.y,
-            this.itemConveyorTargetPosition.z + this.itemConveyorStartOffset.z,
-        );
-    }
-
-    private ShowItemConveyor(): void {
-        if (!this.itemConveyor?.isValid || !this.hasItemConveyorTargetPosition) return;
-
-        this.itemConveyorTween?.stop();
-        this.itemConveyor.active = true;
-        this.itemConveyorTween = tween(this.itemConveyor)
-            .to(this.itemConveyorFlyDuration, { position: this.itemConveyorTargetPosition }, { easing: 'backOut' })
-            .call(() => this.itemConveyorTween = null)
-            .start();
     }
 
     private MoveScreenTargetOnComplete(): void {
