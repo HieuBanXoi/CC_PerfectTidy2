@@ -16,6 +16,7 @@ export enum ItemState {
     OnDrag = 1,
     MoveToCorrectPos = 2,
     OnGoal = 3,
+    Flying = 4,     // Đang bay từ hộp ra vùng spawn (chưa tương tác / chưa hiện hand được)
 }
 Enum(ItemState);
 
@@ -423,6 +424,11 @@ export class ItemSnap extends Component {
 
                 this.SpawnVFX();
                 this.EnableAnimatorWhenPlaced();
+
+                // Punch item một phát khi snap đúng (bật/tắt trong ItemSpawnManager)
+                if (spawnMgr && typeof spawnMgr.PunchItem === 'function') {
+                    spawnMgr.PunchItem(this);
+                }
 
                 if (this.shadowOnHolder && !this.hideShadowOnDrop) {
                     this.shadowOnHolder.active = true;

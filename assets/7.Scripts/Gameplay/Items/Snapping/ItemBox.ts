@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Vec3, Enum, Tween, tween, Sprite, SpriteFrame, UITransform, EventTouch, sp } from 'cc';
+import { _decorator, Node, Vec3, Enum, UITransform, EventTouch, sp } from 'cc';
 import { ItemSpawnManager } from './ItemSpawnManager';
 import { BoxGraphicController } from './BoxGraphicController';
 import { Ply_EventHandlerComponent } from '../../Framework/Ply_EventHandlerComponent';
@@ -8,35 +8,35 @@ import { GameManager } from '../../Systems/GameManager';
 
 const { ccclass, property } = _decorator;
 
-export enum BoxAnimationType {
-    Tween = 0,    // Dùng anim nhún nảy Tween & đổi Sprite cũ
-    Spine = 1,    // Dùng hệ thống Spine animation (0-Drop, 1-ready-Loop, 2-OPEN, 3-OPEN-click, 4-End)
-}
-Enum(BoxAnimationType);
-
+/**
+ * Hộp chứa item: chỉ quản lý animation Spine của hộp và đăng ký điểm xuất phát (spawnPoint)
+ * cho ItemSpawnManager. Toàn bộ logic spawn item nằm ở ItemSpawnManager.
+ *
+ * Luồng Spine: "0-Drop" -> "1-ready-Loop" -> (click) "2-OPEN" -> "3-OPEN-click" -> "3-OPEN-loop-break"
+ *              -> (click tiếp) "3-OPEN-click" -> "3-OPEN-loop" -> (hết item / hết lượt) "4-End"
+ */
 @ccclass('ItemBox')
 export class ItemBox extends Ply_EventHandlerComponent {
 
     @property({
-        tooltip: 'Sử dụng logic mở hộp để spawn item'
+        tooltip: 'Bật hộp: item sẽ bay ra từ spawnPoint khi click. Tắt thì hộp không đăng ký với ItemSpawnManager'
     })
     public useBox: boolean = true;
 
     @property({
-        type: Enum(BoxAnimationType),
-        tooltip: 'Tween: Dùng anim nhún nảy Tween & SpriteFrame cũ; Spine: Dùng bộ Spine animation'
+        tooltip: 'Tự hiện hộp ngay khi start. Tắt = hộp ẩn lúc đầu, chỉ xuất hiện khi gọi BoxAppear()'
     })
-    public animationType: BoxAnimationType = BoxAnimationType.Spine;
+    public appearOnStart: boolean = false;
 
     @property({
         type: BoxGraphicController,
-        tooltip: 'Controller điều khiển animation Spine của Box (dùng khi animationType = Spine)'
+        tooltip: 'Controller điều khiển animation Spine của Box (để trống sẽ tự tìm)'
     })
     public graphicController: BoxGraphicController | null = null;
 
     @property({
         type: sp.Skeleton,
-        tooltip: 'Component Spine Skeleton của Box (dùng khi animationType = Spine)'
+        tooltip: 'Component Spine Skeleton của Box (để trống sẽ tự tìm)'
     })
     public skeletonAnimation: sp.Skeleton | null = null;
 
@@ -47,25 +47,15 @@ export class ItemBox extends Ply_EventHandlerComponent {
     public spawnManager: ItemSpawnManager = null!;
 
     @property({
-        tooltip: 'Số lượng item bay ra đồng thời mỗi lần click (0 = lấy theo initialSpawnCount của ItemSpawnManager)'
-    })
-    public spawnCountPerClick: number = 0;
-
-    @property({
-        tooltip: 'Thời gian mỗi item bay từ hộp ra vị trí đích (giây)'
-    })
-    public flyDuration: number = 0.55;
-
-    @property({
-        tooltip: 'Độ cao vồng lên dạng parabol khi item bay ra khỏi hộp'
-    })
-    public jumpHeight: number = 120;
-
-    @property({
         type: Node,
         tooltip: 'Vị trí xuất phát của item (miệng hộp). Nếu để trống sẽ lấy chính tâm của Box'
     })
     public spawnPoint: Node | null = null;
+
+    @property({
+        tooltip: 'Số item bay ra mỗi lần click (0 = dùng initialSpawnCount của ItemSpawnManager)'
+    })
+    public spawnCountPerClick: number = 0;
 
     @property({
         tooltip: 'Cho phép người chơi click vào hộp'
@@ -73,20 +63,19 @@ export class ItemBox extends Ply_EventHandlerComponent {
     public canClick: boolean = true;
 
     @property({
-        tooltip: 'Số lần click tối đa (ví dụ 1 lần là mở hết, hoặc nhiều lần)'
+        tooltip: 'Số lần click tối đa (0 = không giới hạn, click tới khi hết item)'
     })
-    public maxClicks: number = 1;
+    public maxClicks: number = 0;
 
     @property({
-        tooltip: 'Tự động ẩn Box sau khi đã kết thúc animation End / mở hết item'
+        tooltip: 'Cho phép click liên tục: mỗi click bung thêm 1 đợt item ngay cả khi đợt trước đang bay / anim click chưa xong'
+    })
+    public allowRapidClick: boolean = true;
+
+    @property({
+        tooltip: 'Tự động ẩn Box sau khi chạy xong animation End'
     })
     public hideBoxWhenEmpty: boolean = true;
-
-    @property({
-        type: SpriteFrame,
-        tooltip: 'SpriteFrame hộp mở (dùng khi animationType = Tween hoặc khi không có Spine)'
-    })
-    public openBoxSprite: SpriteFrame | null = null;
 
     @property({
         type: Enum(FxType),
@@ -107,17 +96,16 @@ export class ItemBox extends Ply_EventHandlerComponent {
     public onAllItemsSpawned: Ply_Event = new Ply_Event();
 
     private currentClicks: number = 0;
-    private isSpawning: boolean = false;
+    private pendingBatches: number = 0;      // số đợt item đang bay chưa tiếp đất
     private isOpened: boolean = false;
+    private isOpening: boolean = false;      // đang chạy "2-OPEN" lần đầu
     private isPlayingBoxAnimation: boolean = false;
-    private originalScale: Vec3 = new Vec3();
-    private originalPos: Vec3 = new Vec3();
+    private isEnded: boolean = false;
+    private hasAppeared: boolean = false;
+    private animToken: number = 0;           // chỉ callback của anim mới nhất được xử lý (chống spam click)
     private touchStartPos: Vec3 = new Vec3();
 
     protected onLoad(): void {
-        this.originalScale.set(this.node.scale);
-        this.originalPos.set(this.node.position);
-
         // Đảm bảo Node Box có UITransform để bắt được sự kiện touch
         let ut = this.getComponent(UITransform);
         if (!ut) {
@@ -139,57 +127,41 @@ export class ItemBox extends Ply_EventHandlerComponent {
             this.spawnManager = ItemSpawnManager.Ins;
         }
 
-        this.initBoxAnimation();
-    }
-
-    /**
-     * Khởi chạy animation vào màn chơi
-     */
-    private initBoxAnimation(): void {
         if (!this.useBox) {
             return;
         }
 
-        if (this.animationType === BoxAnimationType.Spine && this.hasSpineAnim()) {
-            // Spine: "0-Drop" -> "1-ready-Loop"
-            this.playAnim("0-Drop", false, () => {
-                this.playAnim("1-ready-Loop", true);
-                (GameManager.Ins as any)?.TriggerTutorial?.();
-            });
-        } else {
-            // Tween: Zoom to từ 0, bật nảy lên cao rồi đàn hồi ổn định về vị trí gốc
-            const sx = this.originalScale.x;
-            const sy = this.originalScale.y;
-            const sz = this.originalScale.z;
-            const px = this.originalPos.x;
-            const py = this.originalPos.y;
-            const pz = this.originalPos.z;
-
-            this.node.setScale(Vec3.ZERO);
-            this.node.setPosition(new Vec3(px, py - 35, pz));
-
-            Tween.stopAllByTarget(this.node);
-            tween(this.node)
-                // Giai đoạn 1: Zoom to vượt ngưỡng và bật nảy vọt lên trên
-                .to(0.35, {
-                    scale: new Vec3(sx * 1.18, sy * 1.25, sz),
-                    position: new Vec3(px, py + 28, pz)
-                }, { easing: 'backOut' })
-                // Giai đoạn 2: Rơi nhẹ xuống và nén nhẹ
-                .to(0.16, {
-                    scale: new Vec3(sx * 1.06, sy * 0.92, sz),
-                    position: new Vec3(px, py - 6, pz)
-                }, { easing: 'sineInOut' })
-                // Giai đoạn 3: Ổn định về chuẩn
-                .to(0.18, {
-                    scale: this.originalScale,
-                    position: this.originalPos
-                }, { easing: 'sineOut' })
-                .call(() => {
-                    (GameManager.Ins as any)?.TriggerTutorial?.();
-                })
-                .start();
+        // Đăng ký điểm xuất phát để mọi item spawn từ ItemSpawnManager đều bay ra từ hộp
+        // (khi hộp còn ẩn, HasSpawnSource() tự trả false nên item sẽ hiện tại chỗ)
+        const manager = this.getManager();
+        if (manager) {
+            manager.SetSpawnSource(this.spawnPoint || this.node);
+            if (manager.autoSpawnOnStart) {
+                console.warn('⚠️ [ItemBox] ItemSpawnManager.autoSpawnOnStart đang bật — item sẽ tự bay ra lúc start thay vì chờ click hộp.');
+            }
         }
+
+        if (this.appearOnStart) {
+            this.BoxAppear();
+        } else {
+            // Ẩn hộp, chờ gọi BoxAppear()
+            this.node.active = false;
+        }
+    }
+
+    /**
+     * Hiện hộp: bật node và chạy anim "0-Drop" -> "1-ready-Loop". Gọi từ code / Ply_Event khi muốn hộp xuất hiện.
+     */
+    public BoxAppear(): void {
+        if (!this.useBox || this.hasAppeared || this.isEnded) return;
+        this.hasAppeared = true;
+
+        this.node.active = true;
+
+        this.playAnim("0-Drop", false, () => {
+            this.playAnim("1-ready-Loop", true);
+            (GameManager.Ins as any)?.TriggerTutorial?.();
+        });
     }
 
     protected onEnable(): void {
@@ -200,7 +172,19 @@ export class ItemBox extends Ply_EventHandlerComponent {
     protected onDisable(): void {
         this.node.off(Node.EventType.TOUCH_START, this.onTouchStart, this);
         this.node.off(Node.EventType.TOUCH_END, this.onTouchEnd, this);
-        Tween.stopAllByTarget(this.node);
+    }
+
+    protected onDestroy(): void {
+        // Huỷ đăng ký nguồn spawn nếu vẫn đang trỏ về hộp này
+        const manager = this.getManager();
+        const source = this.spawnPoint || this.node;
+        if (manager && manager.spawnSourceNode === source) {
+            manager.SetSpawnSource(null);
+        }
+    }
+
+    private getManager(): ItemSpawnManager | null {
+        return this.spawnManager || ItemSpawnManager.Ins || null;
     }
 
     private onTouchStart(event: EventTouch): void {
@@ -209,8 +193,6 @@ export class ItemBox extends Ply_EventHandlerComponent {
     }
 
     private onTouchEnd(event: EventTouch): void {
-        if (!this.canClick || this.isSpawning || this.isPlayingBoxAnimation) return;
-
         // Tránh nhầm lẫn giữa vuốt màn hình và click
         const touchLoc = event.getUILocation();
         const dist = Vec3.distance(this.touchStartPos, new Vec3(touchLoc.x, touchLoc.y, 0));
@@ -220,216 +202,136 @@ export class ItemBox extends Ply_EventHandlerComponent {
     }
 
     /**
-     * Mở hộp và spawn item theo loại Animation đã chọn (Tween hoặc Spine)
+     * Click hộp: chạy anim Spine và yêu cầu ItemSpawnManager spawn một đợt item bay ra từ spawnPoint
      */
     public OpenBox(): void {
-        if (!this.canClick || this.isSpawning || this.isPlayingBoxAnimation) return;
+        if (!this.useBox || !this.hasAppeared || !this.canClick || this.isEnded || this.isOpening) return;
+        if (this.maxClicks > 0 && this.currentClicks >= this.maxClicks) return;
+        if (!this.allowRapidClick && (this.isPlayingBoxAnimation || this.pendingBatches > 0)) return;
 
-        const manager = this.spawnManager || ItemSpawnManager.Ins;
+        const manager = this.getManager();
         if (!manager || !manager.HasItems()) {
             this.TryPlayEndAnimation();
             return;
         }
 
         this.currentClicks++;
-        this.isSpawning = true;
 
         Ply_SoundManager.Ins?.PlayFx(this.clickFxType);
         (GameManager.Ins as any)?.ResetInactivityTimer?.(null);
         this.onBoxClick.invoke();
 
-        if (this.animationType === BoxAnimationType.Spine && this.hasSpineAnim()) {
-            this.handleSpineBoxClick(manager);
-        } else {
-            this.handleTweenBoxClick(manager);
-        }
-    }
-
-    /**
-     * Xử lý Anim Box cũ: Nhún nhẹ xuống -> Bung mạnh lên (Spawn item) -> Đàn hồi về ban đầu
-     */
-    private handleTweenBoxClick(manager: ItemSpawnManager): void {
-        const sx = this.originalScale.x;
-        const sy = this.originalScale.y;
-        const sz = this.originalScale.z;
-        const px = this.originalPos.x;
-        const py = this.originalPos.y;
-        const pz = this.originalPos.z;
-
-        Tween.stopAllByTarget(this.node);
-        tween(this.node)
-            // Giai đoạn 1: Nhún nhẹ xuống (Squash & Dip)
-            .to(0.14, {
-                scale: new Vec3(sx * 1.2, sy * 0.78, sz),
-                position: new Vec3(px, py - 16, pz)
-            }, { easing: 'quadOut' })
-            // Giai đoạn 2: Bung mạnh lên (Stretch & Pop up)
-            .to(0.16, {
-                scale: new Vec3(sx * 0.86, sy * 1.28, sz),
-                position: new Vec3(px, py + 22, pz)
-            }, { easing: 'backOut' })
-            // NGAY KHI BUNG LÊN: Đổi sprite (nếu có) và phóng item ra
-            .call(() => {
-                if (this.openBoxSprite) {
-                    const sprite = this.getComponent(Sprite) || this.getComponentInChildren(Sprite);
-                    if (sprite) {
-                        sprite.spriteFrame = this.openBoxSprite;
-                    }
-                }
-                this.spawnBatchItems(manager);
-            })
-            // Giai đoạn 3: Đàn hồi về vị trí và kích thước bình thường
-            .to(0.22, {
-                scale: this.originalScale,
-                position: this.originalPos
-            }, { easing: 'backOut' })
-            .start();
-    }
-
-    /**
-     * Xử lý Anim Box Spine: "2-OPEN" / "3-OPEN-click" -> "3-OPEN-loop-break"
-     */
-    private handleSpineBoxClick(manager: ItemSpawnManager): void {
-        // Lần đầu mở hộp: "2-OPEN" -> spawn item -> "3-OPEN-click" -> "3-OPEN-loop-break"
+        // Lần đầu mở hộp: "2-OPEN" -> spawn -> "3-OPEN-click" -> "3-OPEN-loop-break"
         if (!this.isOpened) {
             this.isOpened = true;
+            this.isOpening = true;
             this.isPlayingBoxAnimation = true;
 
             this.playAnim("2-OPEN", false, () => {
-                // Spawn item ngay khi hộp bung mở hoàn tất
-                this.spawnBatchItems(manager);
-
-                this.playAnim("3-OPEN-click", false, () => {
-                    this.playAnim("3-OPEN-loop-break", true);
-                    this.isPlayingBoxAnimation = false;
-                });
+                this.isOpening = false;
+                this.spawnBatch(manager);
+                this.playAnim("3-OPEN-click", false, () => this.onClickAnimFinished("3-OPEN-loop-break"));
             });
             return;
         }
 
-        // Các lần click tiếp theo khi hộp đã mở sẵn
-        if (!manager.HasItems()) {
-            this.TryPlayEndAnimation();
-            return;
-        }
-
+        // Các lần click tiếp theo: "3-OPEN-click" + spawn đồng thời -> "3-OPEN-loop"
         this.isPlayingBoxAnimation = true;
-        this.playAnim("3-OPEN-click", false, () => {
-            if (!manager.HasItems()) {
-                this.TryPlayEndAnimation();
-            } else {
-                this.playAnim("3-OPEN-loop", true);
-                this.isPlayingBoxAnimation = false;
-            }
-        });
+        this.playAnim("3-OPEN-click", false, () => this.onClickAnimFinished("3-OPEN-loop"));
 
-        this.spawnBatchItems(manager);
+        this.spawnBatch(manager);
     }
 
-    private spawnBatchItems(manager: ItemSpawnManager): void {
-        let countToSpawn = this.spawnCountPerClick;
-        if (countToSpawn <= 0) {
-            countToSpawn = manager.initialSpawnCount || manager.GetRemainingItemCount();
-        }
-        countToSpawn = Math.min(countToSpawn, manager.GetRemainingItemCount());
+    /**
+     * Khi anim click chạy xong: nếu đã hết item / hết lượt thì End, ngược lại về loop
+     */
+    private onClickAnimFinished(loopAnim: string): void {
+        this.isPlayingBoxAnimation = false;
 
-        const spawnWorldPos = this.spawnPoint ? this.spawnPoint.worldPosition : this.node.worldPosition;
-        let landedCount = 0;
-
-        // Phóng đồng thời toàn bộ item trong đợt ra các vị trí ngẫu nhiên
-        for (let i = 0; i < countToSpawn; i++) {
-            manager.SpawnNextItemFromSource(
-                spawnWorldPos,
-                i,
-                countToSpawn,
-                this.flyDuration,
-                this.jumpHeight,
-                () => {
-                    landedCount++;
-                    if (landedCount >= countToSpawn) {
-                        this.onAllItemsLanded(manager);
-                    }
-                }
-            );
+        if (this.shouldEnd()) {
+            this.TryPlayEndAnimation();
+        } else {
+            this.playAnim(loopAnim, true);
         }
+    }
+
+    private shouldEnd(): boolean {
+        const manager = this.getManager();
+        const outOfItems = !manager || !manager.HasItems();
+        const outOfClicks = this.maxClicks > 0 && this.currentClicks >= this.maxClicks;
+        return outOfItems || outOfClicks;
+    }
+
+    private spawnBatch(manager: ItemSpawnManager): void {
+        this.pendingBatches++;
+        manager.SpawnBatch(this.spawnCountPerClick, () => this.onAllItemsLanded(manager));
     }
 
     private onAllItemsLanded(manager: ItemSpawnManager): void {
-        this.isSpawning = false;
+        this.pendingBatches = Math.max(0, this.pendingBatches - 1);
+        if (this.pendingBatches > 0) return;   // còn đợt khác đang bay (spam click)
+
         this.onAllItemsSpawned.invoke();
 
-        // Kích hoạt bàn tay hướng dẫn (HandTut) đầu tiên ngay lập tức (delay = 0)
-        if (manager) {
-            manager.TriggerImmediateHandTut();
-        }
-
-        // Kiểm tra xem đã hết lượt click hoặc hết item chưa
-        if (!manager.HasItems() || (this.maxClicks > 0 && this.currentClicks >= this.maxClicks)) {
+        // Hết item hoặc hết lượt click -> khoá hộp và chạy anim End
+        // (nếu anim click vẫn đang chạy thì onClickAnimFinished sẽ gọi End sau)
+        if (this.shouldEnd()) {
             this.canClick = false;
             this.TryPlayEndAnimation();
         }
     }
 
     /**
-     * Chạy animation kết thúc: "4-End" (Spine) hoặc Tween zoom về 0 (Tween)
+     * Chạy animation kết thúc "4-End" rồi ẩn hộp (nếu hideBoxWhenEmpty)
      */
     public TryPlayEndAnimation(): void {
-        if (!this.useBox) return;
+        if (!this.useBox || this.isEnded || !this.shouldEnd()) return;
 
-        const manager = this.spawnManager || ItemSpawnManager.Ins;
-        if (manager && manager.HasItems() && (this.maxClicks <= 0 || this.currentClicks < this.maxClicks)) {
-            return;
-        }
+        // Đang chạy anim click hoặc còn item đang bay thì chờ xong rồi mới End
+        // (onClickAnimFinished / onAllItemsLanded sẽ gọi lại)
+        if (this.isPlayingBoxAnimation || this.pendingBatches > 0) return;
 
-        if (this.animationType === BoxAnimationType.Spine && this.hasSpineAnim()) {
-            this.isPlayingBoxAnimation = true;
-            this.playAnim("4-End", false, () => {
-                this.isPlayingBoxAnimation = false;
-                if (this.hideBoxWhenEmpty) {
-                    this.node.active = false;
-                }
-            });
-        } else {
+        this.isEnded = true;
+        this.canClick = false;
+        this.isPlayingBoxAnimation = true;
+
+        // Sau khi hộp bị ẩn, ItemSpawnManager.HasSpawnSource() tự trả false (node inactive)
+        // nên item spawn tiếp (Continuous mode) sẽ hiện tại chỗ trong vùng spawn.
+        this.playAnim("4-End", false, () => {
             this.isPlayingBoxAnimation = false;
             if (this.hideBoxWhenEmpty) {
-                Tween.stopAllByTarget(this.node);
-                tween(this.node)
-                    .to(0.3, { scale: Vec3.ZERO }, { easing: 'backIn' })
-                    .call(() => {
-                        this.node.active = false;
-                    })
-                    .start();
+                this.node.active = false;
             }
-        }
-    }
-
-    private hasSpineAnim(): boolean {
-        return !!(this.graphicController || this.skeletonAnimation);
+        });
     }
 
     private playAnim(animName: string, loop: boolean = false, onComplete?: () => void): void {
+        // Mỗi lần đổi anim tăng token; callback của anim cũ (đã bị anim mới đè) sẽ bị bỏ qua
+        const token = ++this.animToken;
+        const guarded = onComplete
+            ? () => { if (token === this.animToken) onComplete(); }
+            : undefined;
+
         if (this.graphicController) {
-            this.graphicController.ChangeAnim(animName, loop, onComplete);
+            this.graphicController.ChangeAnim(animName, loop, guarded);
             return;
         }
 
         if (this.skeletonAnimation) {
             try {
                 const trackEntry = this.skeletonAnimation.setAnimation(0, animName, loop);
-                if (!loop && onComplete) {
+                if (!loop && guarded) {
                     const duration = (trackEntry && trackEntry.animation) ? trackEntry.animation.duration : 0.5;
-                    this.scheduleOnce(() => {
-                        onComplete();
-                    }, duration);
+                    this.scheduleOnce(guarded, duration);
                 }
             } catch (e) {
                 console.error(`❌ [ItemBox] Lỗi play spine anim '${animName}':`, e);
-                onComplete?.();
+                guarded?.();
             }
             return;
         }
 
-        onComplete?.();
+        guarded?.();
     }
 
     public CanClick(canClick: boolean): void {

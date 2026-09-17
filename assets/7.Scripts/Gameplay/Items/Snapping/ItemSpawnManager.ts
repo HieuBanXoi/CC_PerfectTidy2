@@ -74,8 +74,24 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     @property({ tooltip: 'Tự động spawn item khi bắt đầu game. Bỏ tích nếu muốn kích hoạt mở từ ItemBox' })
     public autoSpawnOnStart: boolean = true;
 
-    @property({ min: 1, tooltip: 'Số lượng item được spawn xuất hiện ban đầu khi vào game' })
+    @property({ min: 0, tooltip: 'Số item spawn ban đầu khi vào game / mỗi lần ItemBox click (nếu box không override). 0 = không spawn lúc start; ItemBox click sẽ spawn toàn bộ item còn lại' })
     public initialSpawnCount: number = 3;
+
+    // ==================== SPAWN FROM SOURCE (BOX) ====================
+
+    @property({
+        type: Node,
+        tooltip: 'Điểm xuất phát khi item bay ra (miệng hộp). ItemBox sẽ tự đăng ký node này lúc start; để trống nếu không dùng hộp'
+    })
+    public spawnSourceNode: Node | null = null;
+
+    @property({ min: 0.1, tooltip: 'Thời gian item bay từ nguồn (hộp) tới vị trí đích (giây)' })
+    public flyDuration: number = 0.55;
+
+    @property({ tooltip: 'Độ cao vồng parabol khi item bay ra từ nguồn (hộp)' })
+    public jumpHeight: number = 120;
+
+    // ================================================================
 
     @property({ min: 0.1, tooltip: 'Thời gian hiệu ứng phóng to (scale up) khi item xuất hiện' })
     public revealDuration: number = 0.4;
@@ -91,6 +107,19 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     @property({ tooltip: 'Bật hiệu ứng nhấp nhô lơ lửng cho item khi ở trạng thái chờ trong vùng' })
     public enableIdleBobbing: boolean = true;
+
+    // ==================== PUNCH KHI SNAP ĐÚNG ====================
+
+    @property({ tooltip: 'Punch (nảy scale) item một phát ngay khi snap đúng vào holder' })
+    public enablePunchOnPlaced: boolean = true;
+
+    @property({ min: 1, tooltip: 'Hệ số scale đỉnh của punch (1.2 = phình to 20% rồi về lại)' })
+    public punchScale: number = 1.2;
+
+    @property({ min: 0.05, tooltip: 'Tổng thời gian punch (giây)' })
+    public punchDuration: number = 0.25;
+
+    // =============================================================
 
     @property({ tooltip: 'Bật hand tutorial tự động sau khi spawn item' })
     public enableSpawnHandTut: boolean = true;
@@ -145,6 +174,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     private handTutBoundItems: Set<ItemSnap> = new Set<ItemSnap>();
     private hasShownInitialSpawnHandTut: boolean = false;
     private initialHandTutRetryCount: number = 0;
+    private inFlightCount: number = 0;       // số item đang bay từ hộp, chưa tiếp đất
 
     public get PlacedItemCount(): number {
         return this.placedItemCount;
@@ -235,48 +265,112 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         return Math.max(0, this.dynamicItems.length - this.currentItemIndex);
     }
 
+    // ==================== SPAWN SOURCE (BOX) ====================
+
     /**
-     * Spawn đợt item ban đầu vào trong vùng spawn.
+     * Đăng ký / huỷ đăng ký điểm xuất phát của item (ItemBox gọi khi start / destroy).
+     */
+    public SetSpawnSource(sourceNode: Node | null): void {
+        this.spawnSourceNode = sourceNode;
+    }
+
+    public HasSpawnSource(): boolean {
+        return !!this.spawnSourceNode && this.spawnSourceNode.isValid && this.spawnSourceNode.activeInHierarchy;
+    }
+
+    private getSpawnSourceWorldPos(): Vec3 | null {
+        return this.HasSpawnSource() ? this.spawnSourceNode!.worldPosition.clone() : null;
+    }
+
+    // ==================== BATCH SPAWN ====================
+
+    /**
+     * Spawn đợt item ban đầu vào trong vùng spawn (dùng khi autoSpawnOnStart = true).
      */
     public RevealInitialItems(): void {
-        const countToSpawn = Math.min(this.initialSpawnCount, this.dynamicItems.length - this.currentItemIndex);
-
-        if (countToSpawn <= 0) {
-            (GameManager.Ins as any)?.TriggerTutorial?.();
-            return;
+        if (this.initialSpawnCount > 0) {
+            this.SpawnBatch(this.initialSpawnCount);
+        } else {
+            this.onBatchLanded();
         }
-
-        let revealedCount = 0;
-        let spawnedCount = 0;
-
-        for (let i = 0; i < countToSpawn; i++) {
-            const spawned = this.SpawnNextItem(() => {
-                revealedCount++;
-
-                // Lần spawn đầu tiên: hiển thị hand ngay, không delay.
-                if (revealedCount >= spawnedCount && !this.hasShownInitialSpawnHandTut) {
-                    this.scheduleSpawnHandTut(true);
-                    this.hasShownInitialSpawnHandTut = true;
-                }
-            }, false);
-
-            if (spawned) {
-                spawnedCount++;
-            }
-        }
-
-        if (spawnedCount <= 0 && !this.hasShownInitialSpawnHandTut) {
-            this.scheduleSpawnHandTut(true);
-            this.hasShownInitialSpawnHandTut = true;
-        }
-
         (GameManager.Ins as any)?.TriggerTutorial?.();
     }
 
     /**
-     * Spawn item tiếp theo từ danh sách dynamicItems vào một toạ độ ngẫu nhiên trong vùng UITransform.
+     * Spawn đồng thời một đợt item (bay ra từ hộp nếu có spawnSourceNode, ngược lại hiện tại chỗ).
+     * @param count Số item muốn spawn (<= 0 sẽ dùng initialSpawnCount; nếu initialSpawnCount cũng = 0 thì spawn toàn bộ item còn lại)
+     * @param onAllLanded Gọi khi tất cả item trong đợt đã tiếp đất, kèm số item thực tế đã spawn
+     * @returns Số item thực tế đã spawn
+     */
+    public SpawnBatch(count: number = 0, onAllLanded?: (spawnedCount: number) => void): number {
+        const remaining = this.GetRemainingItemCount();
+        let countToSpawn = count > 0 ? count : (this.initialSpawnCount > 0 ? this.initialSpawnCount : remaining);
+        countToSpawn = Math.min(countToSpawn, remaining);
+
+        if (countToSpawn <= 0 || this.isReachedLimit) {
+            this.onBatchLanded();
+            onAllLanded?.(0);
+            return 0;
+        }
+
+        const sourceWorldPos = this.getSpawnSourceWorldPos();
+        let spawnedCount = 0;
+        let landedCount = 0;
+
+        const onEachLanded = () => {
+            landedCount++;
+            if (landedCount >= spawnedCount) {
+                this.onBatchLanded();
+                onAllLanded?.(spawnedCount);
+            }
+        };
+
+        for (let i = 0; i < countToSpawn; i++) {
+            const item = sourceWorldPos
+                ? this.SpawnNextItemFromSource(sourceWorldPos, i, countToSpawn, this.flyDuration, this.jumpHeight, onEachLanded, false)
+                : this.spawnNextItemInPlace(onEachLanded, false);
+
+            if (item) spawnedCount++;
+        }
+
+        if (spawnedCount <= 0) {
+            this.onBatchLanded();
+            onAllLanded?.(0);
+        }
+
+        return spawnedCount;
+    }
+
+    /**
+     * Sau khi cả đợt tiếp đất: hiện hand tutorial ngay (không delay).
+     * Nếu vẫn còn item của đợt khác đang bay (click liên tục) thì chờ đợt cuối tiếp đất.
+     */
+    private onBatchLanded(): void {
+        if (this.inFlightCount > 0) return;
+        this.scheduleSpawnHandTut(true);
+        this.hasShownInitialSpawnHandTut = true;
+    }
+
+    public get InFlightCount(): number {
+        return this.inFlightCount;
+    }
+
+    /**
+     * Spawn item tiếp theo từ danh sách dynamicItems.
+     * Nếu có spawnSourceNode (hộp) thì item bay ra từ hộp, ngược lại hiện tại chỗ trong vùng spawn.
      */
     public SpawnNextItem(onComplete?: (spawnedItem: ItemSnap) => void, shouldScheduleHandTut: boolean = true): ItemSnap | null {
+        const sourceWorldPos = this.getSpawnSourceWorldPos();
+        if (sourceWorldPos) {
+            return this.SpawnNextItemFromSource(sourceWorldPos, 0, 1, this.flyDuration, this.jumpHeight, onComplete, shouldScheduleHandTut);
+        }
+        return this.spawnNextItemInPlace(onComplete, shouldScheduleHandTut);
+    }
+
+    /**
+     * Spawn item tiếp theo vào một toạ độ ngẫu nhiên trong vùng UITransform (scale up tại chỗ).
+     */
+    private spawnNextItemInPlace(onComplete?: (spawnedItem: ItemSnap) => void, shouldScheduleHandTut: boolean = true): ItemSnap | null {
         if (this.isReachedLimit || this.currentItemIndex >= this.dynamicItems.length) {
             return null;
         }
@@ -409,6 +503,10 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         itemNode.active = true;
         item.enabled = true;
 
+        // Đang bay: không cho kéo, không cho hand tut bám vào
+        item.ChangeState(ItemState.Flying);
+        this.inFlightCount++;
+
         this.bindItemHandTutEvents(item);
 
         const actualJumpHeight = jumpHeight + (itemIndexInBatch % 2 === 0 ? 15 : -15);
@@ -441,6 +539,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
                 item.waitingPosition = itemNode.worldPosition.clone();
                 item.ChangeState(ItemState.Waiting);
+                this.inFlightCount = Math.max(0, this.inFlightCount - 1);
 
                 if (this.enableIdleBobbing) {
                     item.StartIdleBobbing();
@@ -462,6 +561,22 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
      */
     public TriggerImmediateHandTut(): void {
         this.scheduleSpawnHandTut(true);
+    }
+
+    /**
+     * Punch (nảy scale) item một phát. ItemSnap gọi ngay sau khi snap đúng vào holder.
+     */
+    public PunchItem(item: ItemSnap): void {
+        if (!this.enablePunchOnPlaced || !item || !item.node || !item.node.isValid) return;
+
+        const node = item.node;
+        const base = node.scale.clone();
+        const peak = base.clone().multiplyScalar(this.punchScale);
+
+        tween(node)
+            .to(this.punchDuration * 0.4, { scale: peak }, { easing: 'quadOut' })
+            .to(this.punchDuration * 0.6, { scale: base }, { easing: 'backOut' })
+            .start();
     }
 
     /**
@@ -673,6 +788,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     private showSpawnHandTut = (): void => {
         if (!this.enableSpawnHandTut || !this.node.activeInHierarchy) return;
+
+        // Còn item đang bay thì chưa hiện hand; đợt tiếp đất xong sẽ tự gọi lại
+        if (this.inFlightCount > 0) return;
 
         const shown = this.tryShowSpawnHandTut();
 

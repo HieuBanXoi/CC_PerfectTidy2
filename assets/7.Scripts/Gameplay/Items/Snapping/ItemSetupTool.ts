@@ -165,12 +165,12 @@ export class ItemSetupTool extends Component {
 
         const currentScale = itemNode.scale.clone();
         itemSnap.baseScale = currentScale.clone();
-        itemSnap.id = id;
+        itemSnap.id = index;
         itemSnap.correctHolderTransform = holderNode;
         itemSnap.currentState = ItemState.Waiting;
         itemSnap.waitingPosition = itemNode.worldPosition.clone();
         if (sprite) itemSnap.spriteRenderer = sprite;
-        holder.id = id;
+        holder.id = index;
 
         // Link shadow
         const shadowNode = shadows.get(itemNode.name) || this.findShadowOnHolder(holderNode, itemNode.name);
@@ -228,7 +228,7 @@ export class ItemSetupTool extends Component {
         let createdCount = 0;
         for (const holder of this.holdersParent.children) {
             if (!holder.name.startsWith(this.holderPrefix)) continue;
-            const itemName = holder.name.substring(this.holderPrefix.Length ?? this.holderPrefix.length);
+            const itemName = holder.name.substring(this.holderPrefix.length);
             const itemSnap = itemsByName.get(itemName);
             if (!itemSnap) continue;
 
