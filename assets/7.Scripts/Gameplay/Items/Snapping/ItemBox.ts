@@ -5,6 +5,7 @@ import { Ply_EventHandlerComponent } from '../../Framework/Ply_EventHandlerCompo
 import { Ply_Event } from '../../Framework/Ply_Event';
 import { Ply_SoundManager, FxType } from '../../Framework/Ply_SoundManager';
 import { GameManager } from '../../Systems/GameManager';
+import { HandTutManager } from '../../Systems/HandTutManager';
 
 const { ccclass, property } = _decorator;
 
@@ -82,6 +83,25 @@ export class ItemBox extends Ply_EventHandlerComponent {
         tooltip: 'Âm thanh khi click mở hộp'
     })
     public clickFxType: FxType = FxType.Click;
+
+    // ==================== HAND TUTORIAL ====================
+
+    @property({
+        tooltip: 'Sau khi hộp xuất hiện, nếu người chơi không click và không còn item nào chờ trên màn thì hand tut (zoom ra/vào) trỏ vào hộp'
+    })
+    public enableHandTut: boolean = true;
+
+    @property({
+        min: 0,
+        tooltip: 'Số giây chờ không thao tác trước khi hand tut trỏ vào hộp (ghi đè delay của HandTutManager)'
+    })
+    public handTutDelay: number = 5;
+
+    @property({
+        type: Node,
+        tooltip: 'Vị trí hand tut đặt lên hộp (để trống = tâm node Box)'
+    })
+    public handTutPoint: Node | null = null;
 
     @property({
         type: Ply_Event,
@@ -161,7 +181,45 @@ export class ItemBox extends Ply_EventHandlerComponent {
         this.playAnim("0-Drop", false, () => {
             this.playAnim("1-ready-Loop", true);
             (GameManager.Ins as any)?.TriggerTutorial?.();
+            this.armHandTut();
         });
+    }
+
+    // ==================== HAND TUTORIAL ====================
+
+    /**
+     * Đăng ký hộp làm mục tiêu click-hint dự phòng của HandTutManager: khi không còn item nào
+     * sẵn sàng (Item thường lẫn ItemSnap đang chờ) thì sau handTutDelay hand sẽ zoom ra/vào trên hộp.
+     */
+    private armHandTut(): void {
+        if (!this.enableHandTut) return;
+        const handTut = HandTutManager.Ins;
+        if (!handTut) return;
+
+        handTut.SetFallbackClickTarget(this.getHandTutNode(), () => this.CanShowHandTut());
+        handTut.SetIdleDelayOverride(this.handTutDelay);
+        handTut.StartHandTut();
+    }
+
+    private disarmHandTut(): void {
+        HandTutManager.Ins?.ClearFallbackClickTarget(this.getHandTutNode());
+    }
+
+    private getHandTutNode(): Node {
+        return this.handTutPoint || this.node;
+    }
+
+    /** Hộp còn click được, còn item để bung và không có ItemSnap nào đang chờ / đang bay trên màn. */
+    public CanShowHandTut(): boolean {
+        if (!this.useBox || !this.hasAppeared || !this.canClick || this.isEnded || this.isOpening) return false;
+        if (this.maxClicks > 0 && this.currentClicks >= this.maxClicks) return false;
+        if (this.pendingBatches > 0) return false;
+
+        const manager = this.getManager();
+        if (!manager || !manager.HasItems()) return false;
+
+        // Item còn chờ trên màn đã có hand kéo riêng của ItemSpawnManager
+        return manager.InFlightCount <= 0 && !manager.HasWaitingItemsOnScreen();
     }
 
     protected onEnable(): void {
@@ -175,6 +233,8 @@ export class ItemBox extends Ply_EventHandlerComponent {
     }
 
     protected onDestroy(): void {
+        this.disarmHandTut();
+
         // Huỷ đăng ký nguồn spawn nếu vẫn đang trỏ về hộp này
         const manager = this.getManager();
         const source = this.spawnPoint || this.node;
@@ -219,6 +279,7 @@ export class ItemBox extends Ply_EventHandlerComponent {
 
         Ply_SoundManager.Ins?.PlayFx(this.clickFxType);
         (GameManager.Ins as any)?.ResetInactivityTimer?.(null);
+        HandTutManager.Ins?.RegisterCorrectAction();
         this.onBoxClick.invoke();
 
         // Lần đầu mở hộp: "2-OPEN" -> spawn -> "3-OPEN-click" -> "3-OPEN-loop-break"
@@ -294,6 +355,7 @@ export class ItemBox extends Ply_EventHandlerComponent {
         this.isEnded = true;
         this.canClick = false;
         this.isPlayingBoxAnimation = true;
+        this.disarmHandTut();
 
         // Sau khi hộp bị ẩn, ItemSpawnManager.HasSpawnSource() tự trả false (node inactive)
         // nên item spawn tiếp (Continuous mode) sẽ hiện tại chỗ trong vùng spawn.

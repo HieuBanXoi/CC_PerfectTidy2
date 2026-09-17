@@ -1,5 +1,6 @@
 import { _decorator, Component, Node, Tween, tween, Vec3 } from 'cc';
 import type { CloudEffect } from '../Effects/CloudEffect';
+import type { Item } from '../Items/Components/Item';
 import { PoolType } from '../../Core/Pooling/PoolMember';
 import { World } from '../../Core/Managers/World';
 import { ipm } from '../../Core/Managers/InputManager';
@@ -29,6 +30,12 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
 
     @property({ tooltip: 'Spawn a cloud effect when the next cleaning item appears.' })
     public spawnCloudOnItemShow = true;
+
+    @property({ tooltip: 'Register each shown item with HandTutManager so it gets a hand hint after handTutDelay.' })
+    public enableHandTut = true;
+
+    @property({ min: 0, tooltip: 'Seconds the player can idle on the current item before the hand hint appears (overrides HandTutManager delays).' })
+    public handTutDelay = 5;
 
     @property({ tooltip: 'Move and zoom InputManager screenTarget after all cleaning items are complete.' })
     public moveScreenTargetOnComplete = false;
@@ -81,9 +88,6 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         this.isTransitioning = false;
         this.hasCompletedSequence = false;
         this.ShowNextItem();
-        this.scheduleOnce(() => {
-            HandTutManager.Ins?.StartHandTutNoDelay();
-        }, 0);
     }
 
     /** Hides the active item, then displays the next one in the array. */
@@ -96,6 +100,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             return;
         }
 
+        this.disarmHandTut(item);
         this.isTransitioning = true;
         this.stopActiveTween();
         const zeroScale = this.getZeroScale(item);
@@ -140,6 +145,33 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             .to(this.zoomDuration, { scale: targetScale }, { easing: 'backOut' })
             .call(() => this.activeTween = null)
             .start();
+
+        // Next frame: HandTutManager.start() may still run after ours on the
+        // first item and would otherwise reset the started flag we set here.
+        this.scheduleOnce(() => this.armHandTut(item), 0);
+    }
+
+    /** Registers the shown item with HandTutManager and restarts its idle delay. */
+    private armHandTut(item: Component): void {
+        if (!this.enableHandTut || !item?.isValid || !item.node.activeInHierarchy) return;
+
+        const handTut = HandTutManager.Ins;
+        const tutorialItem = this.getTutorialItem(item);
+        if (!handTut || !tutorialItem) return;
+
+        handTut.AddItem(tutorialItem, true);
+        handTut.SetIdleDelayOverride(this.handTutDelay);
+        handTut.StartHandTut();
+    }
+
+    private disarmHandTut(item: Component): void {
+        const tutorialItem = this.getTutorialItem(item);
+        if (tutorialItem) HandTutManager.Ins?.ItemDone(tutorialItem);
+    }
+
+    private getTutorialItem(item: Component): Item | null {
+        // String lookup keeps Item out of this file's imports (see the note on `items`).
+        return item.getComponent('Item') as Item | null;
     }
 
     private cacheItemScales(): void {

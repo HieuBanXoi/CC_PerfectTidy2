@@ -65,6 +65,13 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     private currentHintToken = 0;
     private activeAuxTween: Tween<object> | null = null;
     private boundItems = new Set<Item>();
+    // The hand node is shared with ItemSpawnManager. Only touch it while this
+    // manager is the one showing a hint, so the two never cancel each other.
+    private isShowingHint = false;
+    private idleDelayOverride = -1;
+    private fallbackClickNode: Node | null = null;
+    private fallbackClickCondition: (() => boolean) | null = null;
+    private currentFallbackNode: Node | null = null;
 
     protected onLoad(): void {
         super.onLoad();
@@ -93,6 +100,14 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         // Hide it immediately so the hand never points to invisible content.
         if (this.currentItemHandTut
             && (!this.currentItemHandTut.node.activeInHierarchy || this.currentItemHandTut.isDone)) {
+            this.hideHandTut();
+            this.resetIdleTimer();
+            return;
+        }
+
+        // Same for the fallback click target (for example ItemBox once its
+        // items are on screen or it has been emptied).
+        if (this.currentFallbackNode && !this.canShowFallbackClick()) {
             this.hideHandTut();
             this.resetIdleTimer();
             return;
@@ -157,6 +172,40 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         this.RegisterCorrectAction();
     }
 
+    /** Registers an item at runtime (for example a cleaning item revealed by ItemCleanManager). */
+    public AddItem(item: Item, prioritize = false): void {
+        if (!item || this.items.includes(item)) return;
+        if (prioritize) this.items.unshift(item);
+        else this.items.push(item);
+        this.bindConfiguredItems();
+    }
+
+    /**
+     * Node that receives a click (zoom in/out) hint whenever no configured item
+     * is ready, for example an ItemBox waiting to be opened. `canShow` is
+     * re-checked every frame while that hint plays. Pass null to clear.
+     */
+    public SetFallbackClickTarget(node: Node | null, canShow: (() => boolean) | null = null): void {
+        if (this.currentFallbackNode && this.currentFallbackNode !== node) this.ResetHandTutDelay();
+        this.fallbackClickNode = node;
+        this.fallbackClickCondition = canShow;
+    }
+
+    /** Clears the fallback target, or does nothing when `node` is not the registered one. */
+    public ClearFallbackClickTarget(node?: Node): void {
+        if (node && this.fallbackClickNode !== node) return;
+        this.SetFallbackClickTarget(null);
+    }
+
+    /**
+     * Replaces idleDelay/firstHandTutDelay/noDelayItemCount with a fixed delay
+     * so gameplay managers can own their own hint timing. Negative = use the
+     * configured delays again.
+     */
+    public SetIdleDelayOverride(delay: number): void {
+        this.idleDelayOverride = delay;
+    }
+
     public RegisterCorrectAction(): void {
         this.isGameplayDragging = false;
         this.consecutiveDropFails = 0;
@@ -214,6 +263,11 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         const item = this.getFirstTutorialReadyItem();
         if (!item) {
             this.currentItemHandTut = null;
+            if (this.canShowFallbackClick()) {
+                this.playClickHint(this.fallbackClickNode!);
+                this.currentFallbackNode = this.fallbackClickNode;
+                this.TypeHind = TypeHind.Click;
+            }
             return;
         }
 
@@ -288,6 +342,12 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         return !!item.itemStirring?.enabled && !item.itemStirring.IsDone;
     }
 
+    private canShowFallbackClick(): boolean {
+        const node = this.fallbackClickNode;
+        if (!node?.isValid || !node.activeInHierarchy) return false;
+        return this.fallbackClickCondition ? this.fallbackClickCondition() : true;
+    }
+
     private playClickHint(target: Node): void {
         const token = this.prepareHand(target.worldPosition);
         const loop = () => {
@@ -349,6 +409,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         this.handNode.setScale(this.handDefaultScale);
         this.setHandAlpha(this.handDefaultAlpha);
         this.handNode.active = true;
+        this.isShowingHint = true;
         this.shownCount++;
         this.hasShownFirstHint = true;
         this.forceNoDelay = false;
@@ -358,10 +419,12 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     private hideHandTut(): void {
         this.currentHintToken++;
         this.currentItemHandTut = null;
+        this.currentFallbackNode = null;
         this.TypeHind = TypeHind.None;
         this.activeAuxTween?.stop();
         this.activeAuxTween = null;
-        if (!this.handNode) return;
+        if (!this.handNode || !this.isShowingHint) return;
+        this.isShowingHint = false;
         Tween.stopAllByTarget(this.handNode);
         this.handNode.setScale(this.handDefaultScale);
         this.setHandAlpha(this.handDefaultAlpha);
@@ -377,7 +440,9 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     }
 
     private getCurrentDelay(): number {
-        if (this.forceNoDelay || this.shownCount < this.noDelayItemCount) return this.shortIdleDelay;
+        if (this.forceNoDelay) return this.shortIdleDelay;
+        if (this.idleDelayOverride >= 0) return this.idleDelayOverride;
+        if (this.shownCount < this.noDelayItemCount) return this.shortIdleDelay;
         return this.hasShownFirstHint ? this.idleDelay : this.firstHandTutDelay;
     }
 

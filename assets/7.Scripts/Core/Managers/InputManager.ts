@@ -299,7 +299,9 @@ export class InputManager extends Ply_Singleton<InputManager> {
 
     onTouchStart(event: EventTouch) {
         const wasInputLocked = this.isInputLocked;
-        if (this.isFirstMove && GameManager.Ins?.IsPlaying()) {
+        // The very first touch anywhere dismisses the UI intro, even before
+        // GameManager reports IsPlaying().
+        if (this.isFirstMove) {
             this.isFirstMove = false;
             Ply_SoundManager.Ins?.PlayBgm();
             ui?.firstMove();

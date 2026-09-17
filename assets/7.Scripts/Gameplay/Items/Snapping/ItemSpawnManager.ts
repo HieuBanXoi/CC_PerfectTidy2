@@ -91,6 +91,15 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     @property({ tooltip: 'Độ cao vồng parabol khi item bay ra từ nguồn (hộp)' })
     public jumpHeight: number = 120;
 
+    @property({ tooltip: 'Punch (nảy scale) item khi gần bay tới nơi cho sinh động' })
+    public enableFlyPunch: boolean = true;
+
+    @property({ range: [0.3, 0.95, 0.05], slide: true, tooltip: 'Thời điểm bắt đầu punch, tính theo % thời gian bay (0.7 = khi bay được 70% quãng đường)' })
+    public flyPunchStartRatio: number = 0.7;
+
+    @property({ min: 1, tooltip: 'Hệ số scale đỉnh của punch lúc bay tới nơi' })
+    public flyPunchScale: number = 1.25;
+
     // ================================================================
 
     @property({ min: 0.1, tooltip: 'Thời gian hiệu ứng phóng to (scale up) khi item xuất hiện' })
@@ -174,6 +183,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     private handTutBoundItems: Set<ItemSnap> = new Set<ItemSnap>();
     private hasShownInitialSpawnHandTut: boolean = false;
     private initialHandTutRetryCount: number = 0;
+    private isSpawnHandTutShowing: boolean = false;   // hand node dùng chung với HandTutManager: chỉ tắt khi chính mình đang hiện
     private inFlightCount: number = 0;       // số item đang bay từ hộp, chưa tiếp đất
 
     public get PlacedItemCount(): number {
@@ -276,6 +286,11 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     public HasSpawnSource(): boolean {
         return !!this.spawnSourceNode && this.spawnSourceNode.isValid && this.spawnSourceNode.activeInHierarchy;
+    }
+
+    /** Còn ItemSnap nào đang chờ được kéo trên màn hình không (ItemBox dùng để quyết định hand tut trỏ vào hộp). */
+    public HasWaitingItemsOnScreen(): boolean {
+        return this.getTopPriorityWaitingItem() !== null;
     }
 
     private getSpawnSourceWorldPos(): Vec3 | null {
@@ -511,10 +526,23 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
         const actualJumpHeight = jumpHeight + (itemIndexInBatch % 2 === 0 ? 15 : -15);
 
-        // 1. TWEEN SCALE: Zoom đồng thời từ 0 lên targetScale với hiệu ứng đàn hồi backOut
-        tween(itemNode)
-            .to(flyDuration, { scale: targetScale }, { easing: 'backOut' })
-            .start();
+        // 1. TWEEN SCALE: Zoom từ 0 lên targetScale; nếu bật flyPunch thì khi gần tới nơi
+        //    phình lên flyPunchScale rồi nảy về targetScale đúng lúc tiếp đất
+        if (this.enableFlyPunch) {
+            const growDuration = flyDuration * math.clamp(this.flyPunchStartRatio, 0.3, 0.95);
+            const punchDuration = flyDuration - growDuration;
+            const peakScale = targetScale.clone().multiplyScalar(this.flyPunchScale);
+
+            tween(itemNode)
+                .to(growDuration, { scale: targetScale }, { easing: 'quadOut' })
+                .to(punchDuration * 0.4, { scale: peakScale }, { easing: 'quadOut' })
+                .to(punchDuration * 0.6, { scale: targetScale }, { easing: 'backOut' })
+                .start();
+        } else {
+            tween(itemNode)
+                .to(flyDuration, { scale: targetScale }, { easing: 'backOut' })
+                .start();
+        }
 
         // 2. TWEEN POSITION: Jump Parabol từ startLocalPos tới targetLocalPos (giữ nguyên góc xoay)
         const animState = { t: 0 };
@@ -764,7 +792,8 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
             this.cancelSpawnHandTut();
         });
         item.onPlacedSuccess.addListener(() => {
-            this.cancelSpawnHandTut();
+            // Các item còn chờ trên màn vẫn được nhắc lại sau handTutDelay
+            this.scheduleSpawnHandTut();
         });
         item.onPlacedFail.addListener(() => {
             this.scheduleSpawnHandTut();
@@ -818,10 +847,14 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         this.handTutNode = handNode;
         this.handTutOpacity = handNode.getComponent(UIOpacity);
 
+        // Nhường hand: HandTutManager (nếu đang hiện hint khác) tắt hint của nó và tính lại delay
+        HandTutManager.Ins?.ResetHandTutDelay();
+
         this.bringHandToFront();
         this.handTutToken++;
         const token = this.handTutToken;
 
+        this.isSpawnHandTutShowing = true;
         handNode.active = true;
         handNode.setWorldPosition(startPos);
         this.setHandTutAlpha(this.handTutDefaultAlpha);
@@ -890,7 +923,8 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     }
 
     private hideSpawnHandTut(): void {
-        if (!this.handTutNode || !this.handTutNode.isValid) return;
+        if (!this.isSpawnHandTutShowing || !this.handTutNode || !this.handTutNode.isValid) return;
+        this.isSpawnHandTutShowing = false;
         Tween.stopAllByTarget(this.handTutNode);
         this.handTutNode.active = false;
         this.setHandTutAlpha(this.handTutDefaultAlpha);

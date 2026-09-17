@@ -29,8 +29,14 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
     @property({ tooltip: 'Hệ số khoảng cách giữa các bước nội suy (0.3 = 30% bán kính cọ)' })
     public spacingFactor: number = 0.3;
 
+    @property({ min: 1, step: 1, tooltip: 'Số lần chổi phải lau qua một chỗ để sạch hẳn. Ví dụ 2: lau qua lần 1 mờ 50%, lau lại lần 2 mới sạch (lau qua lại trong cùng 1 lần drag vẫn tính)' })
+    public sweepCount: number = 1;
+
     @property({ type: Ply_Event, tooltip: 'Sự kiện được gọi khi hoàn thành quét mạng nhện (kéo thả hàm xử lý trong Inspector)' })
     public onComplete: Ply_Event = new Ply_Event();
+
+    @property({ type: Ply_Event, tooltip: 'Sự kiện được gọi mỗi khi hoàn thành một lượt quét (kể cả lượt cuối, trước onComplete)' })
+    public onSweepPassComplete: Ply_Event = new Ply_Event();
 
     // Kích thước logic grid
     private readonly GRID_WIDTH = 64;
@@ -39,9 +45,15 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
     private cleanGrid!: Uint8Array;
     private webGrid!: Uint8Array;
 
+    private cellLastStep!: Int32Array;      // step gần nhất cell nằm dưới chổi (phát hiện chổi "đi vào")
+
     private totalWebCells: number = 0;
-    private cleanedCount: number = 0;
+    private levelSum: number = 0;            // tổng số lần lau của tất cả cell (max = totalWebCells * sweepCount)
     private isCompleted: boolean = false;
+    private passReported: number = 0;        // lượt lau cao nhất đã bắn onSweepPassComplete
+    private step: number = 0;                // bộ đếm bước quét (tăng mỗi lần cleanAt)
+    private lastCleanWorldPos: Vec3 = new Vec3();
+    private hasLastCleanPos: boolean = false;
 
     private _uiTransform: UITransform = null!;
 
@@ -49,10 +61,20 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
         return this.isCompleted;
     }
 
+    /** Số lượt lau đã đạt ngưỡng hoàn thành (0..sweepCount) */
+    public get CompletedPasses(): number {
+        return this.passReported;
+    }
+
+    private get totalPasses(): number {
+        return Math.max(1, Math.floor(this.sweepCount));
+    }
+
     onLoad() {
         this._uiTransform = this.node.getComponent(UITransform) || this.getComponentInChildren(UITransform)!;
         this.cleanGrid = new Uint8Array(this.GRID_WIDTH * this.GRID_HEIGHT);
         this.webGrid = new Uint8Array(this.GRID_WIDTH * this.GRID_HEIGHT);
+        this.cellLastStep = new Int32Array(this.GRID_WIDTH * this.GRID_HEIGHT);
 
         this.initWebGrid();
     }
@@ -87,9 +109,13 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
      */
     private initWebGrid() {
         this.totalWebCells = 0;
-        this.cleanedCount = 0;
+        this.levelSum = 0;
         this.isCompleted = false;
+        this.passReported = 0;
+        this.step = 0;
+        this.hasLastCleanPos = false;
         this.cleanGrid.fill(0);
+        this.cellLastStep.fill(-10);
 
         const centerX = this.GRID_WIDTH / 2;
         const centerY = this.GRID_HEIGHT / 2;
@@ -132,6 +158,14 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
     }
 
     /**
+     * Báo bắt đầu một cú drag mới: điểm chạm đầu tiên luôn được tính là chổi "đi vào" dù trùng chỗ vừa nhấc tay.
+     */
+    public BeginStroke() {
+        this.step += 2;
+        this.hasLastCleanPos = false;
+    }
+
+    /**
      * Quét tại 1 điểm tọa độ World
      */
     public cleanAt(worldPosition: Vec3) {
@@ -139,6 +173,15 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
 
         const uiTrans = this.getTargetUITransform();
         if (!uiTrans) return;
+
+        // Mỗi lần gọi là 1 bước quét. Nếu chổi nhảy xa (bắt đầu drag mới mà không gọi BeginStroke)
+        // thì coi như stroke mới để vùng dưới chổi được tính "đi vào" lại.
+        if (this.hasLastCleanPos && Vec3.distance(this.lastCleanWorldPos, worldPosition) > this.brushRadius * 2) {
+            this.step++;
+        }
+        this.step++;
+        this.lastCleanWorldPos.set(worldPosition);
+        this.hasLastCleanPos = true;
 
         // 1. Chuyển World Position -> Local Position của Web Node
         const localPos = uiTrans.convertToNodeSpaceAR(worldPosition);
@@ -163,7 +206,7 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
         // 3. Cập nhật GPU Mask Texture
         const brushRadiusUV = this.brushRadius / width;
         if (this.maskRenderer) {
-            this.maskRenderer.drawCircleUV(u, v, brushRadiusUV);
+            this.maskRenderer.drawCircleUV(u, v, brushRadiusUV, this.totalPasses, this.step);
         }
 
         // 4. Cập nhật CPU Grid
@@ -198,9 +241,14 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
                 // So sánh bình phương khoảng cách
                 if (dx * dx + dy * dy <= radiusSq) {
                     const idx = gy * this.GRID_WIDTH + gx;
-                    if (this.webGrid[idx] === 1 && this.cleanGrid[idx] === 0) {
-                        this.cleanGrid[idx] = 1;
-                        this.cleanedCount++;
+
+                    // cleanGrid = số lần chổi đã lau qua cell; chỉ tăng khi chổi vừa "đi vào" cell
+                    const entering = this.cellLastStep[idx] !== this.step - 1;
+                    this.cellLastStep[idx] = this.step;
+
+                    if (entering && this.webGrid[idx] === 1 && this.cleanGrid[idx] < this.totalPasses) {
+                        this.cleanGrid[idx]++;
+                        this.levelSum++;
                     }
                 }
             }
@@ -208,15 +256,35 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
     }
 
     private checkProgress() {
-        if (this.totalWebCells === 0) return;
+        if (this.totalWebCells === 0 || this.isCompleted) return;
 
-        const progress = this.cleanedCount / this.totalWebCells;
-        webEventTarget.emit(WebEvent.ON_PROGRESS, progress);
+        webEventTarget.emit(WebEvent.ON_PROGRESS, this.getProgress());
 
-        if (progress >= this.completeThreshold && !this.isCompleted) {
+        // Lượt lau thứ p được coi là hoàn thành khi đủ completeThreshold diện tích đã được lau >= p lần
+        const nextPass = this.passReported + 1;
+        if (nextPass > this.totalPasses) return;
+        if (this.getPassProgress(nextPass) < this.completeThreshold) return;
+
+        this.passReported = nextPass;
+        this.onSweepPassComplete.invoke();
+
+        if (nextPass >= this.totalPasses) {
             this.isCompleted = true;
             this.onCompleteInternal();
+            return;
         }
+
+        // Nâng cả mask + grid lên tối thiểu mức của lượt vừa xong (phần sót lại cũng mờ đều)
+        if (this.maskRenderer) {
+            this.maskRenderer.fillPass(nextPass, this.totalPasses);
+        }
+        for (let i = 0; i < this.cleanGrid.length; i++) {
+            if (this.webGrid[i] === 1 && this.cleanGrid[i] < nextPass) {
+                this.levelSum += nextPass - this.cleanGrid[i];
+                this.cleanGrid[i] = nextPass;
+            }
+        }
+        webEventTarget.emit(WebEvent.ON_PROGRESS, this.getProgress());
     }
 
     private onCompleteInternal() {
@@ -229,16 +297,34 @@ export class DirtCleaner extends Ply_EventHandlerComponent {
 
     public reset() {
         this.isCompleted = false;
-        this.cleanedCount = 0;
+        this.levelSum = 0;
+        this.passReported = 0;
+        this.step = 0;
+        this.hasLastCleanPos = false;
         this.cleanGrid.fill(0);
+        this.cellLastStep.fill(-10);
         if (this.maskRenderer) {
             this.maskRenderer.reset();
         }
         webEventTarget.emit(WebEvent.ON_PROGRESS, 0);
     }
 
+    /** Tiến độ tổng (0..1): tổng số lần lau của mọi cell / (số cell * sweepCount) */
     public getProgress(): number {
-        return this.totalWebCells > 0 ? this.cleanedCount / this.totalWebCells : 0;
+        if (this.isCompleted) return 1;
+        if (this.totalWebCells <= 0) return 0;
+        return clamp01(this.levelSum / (this.totalWebCells * this.totalPasses));
+    }
+
+    /** Tỉ lệ diện tích (0..1) đã được lau ít nhất `pass` lần */
+    public getPassProgress(pass: number = this.totalPasses): number {
+        if (this.totalWebCells <= 0) return 0;
+        const need = Math.max(1, Math.min(this.totalPasses, Math.floor(pass)));
+        let count = 0;
+        for (let i = 0; i < this.cleanGrid.length; i++) {
+            if (this.webGrid[i] === 1 && this.cleanGrid[i] >= need) count++;
+        }
+        return count / this.totalWebCells;
     }
 
     /** Checks whether a world point is inside (or near) the cleaner target bounds. */

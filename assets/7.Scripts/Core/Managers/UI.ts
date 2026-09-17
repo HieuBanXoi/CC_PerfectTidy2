@@ -73,6 +73,7 @@ export class UI extends Component {
     onStoreFuncs: Function[] = [];
 
     onLoad() {
+        ui = this;
         try {
             if(PlayableSDK && PlayableSDK.channel == "Google") {
                 this.isGoogleBuild = true;
@@ -83,6 +84,10 @@ export class UI extends Component {
             this.downloadBtns.forEach(node => node.active = false);
             this.textAnims.forEach(anim => anim.stop());
         }
+    }
+
+    onDestroy() {
+        if (ui === this) ui = null;
     }
 
     bindingToStore() {

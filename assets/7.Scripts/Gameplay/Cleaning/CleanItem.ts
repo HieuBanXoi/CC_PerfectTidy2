@@ -87,6 +87,7 @@ export class CleanItem extends Item {
 
         if (this.dirtCleaner && this.dirtCleaner.canClean && !this.dirtCleaner.IsCompleted) {
             const wasCompletedBeforeClean = this.dirtCleaner.IsCompleted;
+            this.dirtCleaner.BeginStroke();
             this.dirtCleaner.cleanAt(this._lastBrushWorldPos);
             if (!wasCompletedBeforeClean && this.dirtCleaner.IsCompleted) {
                 this._completedDuringCurrentDrag = true;

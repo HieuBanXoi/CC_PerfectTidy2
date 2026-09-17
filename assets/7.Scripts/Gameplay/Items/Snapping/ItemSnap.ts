@@ -86,6 +86,9 @@ export class ItemSnap extends Component {
     @property({ min: 0.05 })
     public snapDuration: number = 0.2;
 
+    @property({ min: 0, tooltip: 'Độ cao vồng lên khi item nhảy vào holder lúc snap (0 = bay thẳng)' })
+    public snapJumpHeight: number = 60;
+
     @property({ min: 0.05 })
     public snapRotateDuration: number = 0.5;
 
@@ -407,9 +410,26 @@ export class ItemSnap extends Component {
             .to(this.snapDuration, { scale: this.baseScale }, { easing: 'backOut' })
             .start();
 
-        tween(this.node)
-            .to(this.snapDuration, { worldPosition: new Vec3(targetPos.x, targetPos.y, this.node.worldPosition.z) }, { easing: 'cubicOut' })
+        // Nhảy vồng parabol vào holder cho sinh động
+        const startWorld = this.node.worldPosition.clone();
+        const endWorld = new Vec3(targetPos.x, targetPos.y, startWorld.z);
+        const snapAnim = { t: 0 };
+        const snapTemp = new Vec3();
+
+        tween(snapAnim)
+            .to(this.snapDuration, { t: 1 }, {
+                easing: 'cubicOut',
+                onUpdate: () => {
+                    if (!this.node || !this.node.isValid) return;
+                    const t = snapAnim.t;
+                    Vec3.lerp(snapTemp, startWorld, endWorld, t);
+                    snapTemp.y += this.snapJumpHeight * Math.sin(math.clamp01(t) * Math.PI);
+                    this.node.setWorldPosition(snapTemp);
+                }
+            })
             .call(() => {
+                if (!this.node || !this.node.isValid) return;
+
                 // Gán Item vào targetParent (holder.attachSlot hoặc holder.node)
                 this.node.setParent(targetParent);
                 this.node.setPosition(Vec3.ZERO);
