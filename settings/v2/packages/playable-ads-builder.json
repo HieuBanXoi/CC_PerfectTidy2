@@ -10,5 +10,6 @@
   "channel_Google": true,
   "appleUrl": "https://apps.apple.com/us/app/perfect-tidy/id6689516283",
   "googleUrl": "https://play.google.com/store/apps/details?id=com.abi.perfect.tidy",
-  "compressionQuality": 80
+  "compressionQuality": 80,
+  "compressionType": "lossy"
 }

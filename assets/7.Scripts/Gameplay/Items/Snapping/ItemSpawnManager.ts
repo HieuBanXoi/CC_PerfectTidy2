@@ -139,6 +139,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     @property({ min: 0, tooltip: 'Delay trước khi hiện hand tutorial sau lần spawn gần nhất (giây)' })
     public handTutDelay: number = 7;
 
+    @property({ min: -1, step: 1, tooltip: 'Số item (khác nhau) được hand tut kéo gợi ý. -1 = không giới hạn, 0 = tắt' })
+    public maxHandTutItemCount: number = -1;
+
     @property({ min: 0.01, tooltip: 'Thời gian hand di chuyển từ item tới holder' })
     public handTutMoveDuration: number = 1.2;
 
@@ -184,6 +187,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     private hasShownInitialSpawnHandTut: boolean = false;
     private initialHandTutRetryCount: number = 0;
     private isSpawnHandTutShowing: boolean = false;   // hand node dùng chung với HandTutManager: chỉ tắt khi chính mình đang hiện
+    private handTutShownItems: Set<ItemSnap> = new Set<ItemSnap>();   // các item đã từng được hand tut (để giới hạn maxHandTutItemCount)
     private inFlightCount: number = 0;       // số item đang bay từ hộp, chưa tiếp đất
 
     public get PlacedItemCount(): number {
@@ -835,8 +839,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         const handNode = this.handTutNode || HandTutManager.Ins?.handNode || null;
         if (!handNode || !handNode.isValid) return false;
 
-        const targetItem = this.getTopPriorityWaitingItem();
+        const targetItem = this.getTopPriorityWaitingItem(true);
         if (!targetItem || !targetItem.node || !targetItem.node.activeInHierarchy) return false;
+        this.handTutShownItems.add(targetItem);
 
         const startPos = targetItem.node.worldPosition.clone();
         const endPos = (targetItem.correctHolderTransform?.activeInHierarchy
@@ -887,13 +892,20 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         return true;
     }
 
-    private getTopPriorityWaitingItem(): ItemSnap | null {
+    /**
+     * Item đang chờ có ưu tiên cao nhất (priority / sibling index).
+     * @param respectHandTutLimit true = chỉ xét item còn trong hạn mức maxHandTutItemCount
+     */
+    private getTopPriorityWaitingItem(respectHandTutLimit: boolean = false): ItemSnap | null {
+        // Bỏ qua item mà requiredItems của nó chưa được đặt (chưa thể snap được thì không gợi ý)
         const candidates = this.dynamicItems.filter(item => {
             return !!item
                 && !!item.node
                 && item.node.activeInHierarchy
                 && item.enabled
-                && item.currentState === ItemState.Waiting;
+                && item.currentState === ItemState.Waiting
+                && item.CanPlaced()
+                && (!respectHandTutLimit || this.canHandTutItem(item));
         });
 
         if (candidates.length === 0) return null;
@@ -913,12 +925,20 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         return candidates[0];
     }
 
+    /** Item còn trong hạn mức maxHandTutItemCount (-1 = không giới hạn). Item đã từng được hand tut luôn được phép tiếp. */
+    private canHandTutItem(item: ItemSnap): boolean {
+        if (this.maxHandTutItemCount < 0) return true;
+        if (this.handTutShownItems.has(item)) return true;
+        return this.handTutShownItems.size < this.maxHandTutItemCount;
+    }
+
     private canContinueHandTut(item: ItemSnap): boolean {
         return !!item
             && !!item.node
             && item.node.activeInHierarchy
             && item.enabled
             && item.currentState === ItemState.Waiting
+            && item.CanPlaced()
             && !this.isReachedLimit;
     }
 

@@ -128,6 +128,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             this.currentItemIndex = -1;
             this.hasCompletedSequence = true;
             this.MoveScreenTargetOnComplete();
+            Ply_SoundManager.Ins?.PlayFx(FxType.Aha);
             this.onAllItemsCleaned?.invoke();
             return;
         }

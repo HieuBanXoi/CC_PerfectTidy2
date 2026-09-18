@@ -92,6 +92,16 @@ export class ItemBox extends Ply_EventHandlerComponent {
     public enableHandTut: boolean = true;
 
     @property({
+        tooltip: 'Hiện hand tut lên hộp ngay khi hộp vừa xuất hiện (không chờ handTutDelay). Các lần nhắc lại sau vẫn dùng handTutDelay'
+    })
+    public showHandTutOnAppear: boolean = true;
+
+    @property({
+        tooltip: 'Chỉ hand tut lên hộp 1 lần (tới khi click hộp lần đầu). Sau đó không nhắc vào hộp nữa'
+    })
+    public handTutOnlyOnce: boolean = true;
+
+    @property({
         min: 0,
         tooltip: 'Số giây chờ không thao tác trước khi hand tut trỏ vào hộp (ghi đè delay của HandTutManager)'
     })
@@ -198,7 +208,11 @@ export class ItemBox extends Ply_EventHandlerComponent {
 
         handTut.SetFallbackClickTarget(this.getHandTutNode(), () => this.CanShowHandTut());
         handTut.SetIdleDelayOverride(this.handTutDelay);
-        handTut.StartHandTut();
+        if (this.showHandTutOnAppear) {
+            handTut.StartHandTutNoDelay();
+        } else {
+            handTut.StartHandTut();
+        }
     }
 
     private disarmHandTut(): void {
@@ -280,6 +294,8 @@ export class ItemBox extends Ply_EventHandlerComponent {
         Ply_SoundManager.Ins?.PlayFx(this.clickFxType);
         (GameManager.Ins as any)?.ResetInactivityTimer?.(null);
         HandTutManager.Ins?.RegisterCorrectAction();
+        // Đã click hộp lần đầu -> không nhắc vào hộp nữa (nếu handTutOnlyOnce)
+        if (this.handTutOnlyOnce) this.disarmHandTut();
         this.onBoxClick.invoke();
 
         // Lần đầu mở hộp: "2-OPEN" -> spawn -> "3-OPEN-click" -> "3-OPEN-loop-break"

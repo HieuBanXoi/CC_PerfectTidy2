@@ -12,7 +12,11 @@ export enum FxType {
     Clean2,
     StarSpark,
     PlaceTrash,
-    CleanItemAppear
+    CleanItemAppear,
+    Aha,
+    SoftPlace, PlaceCan, PlaceWood, PlaceMetal, PlaceLeather,
+    PlaceBag
+    
     
 }
 Enum(FxType);

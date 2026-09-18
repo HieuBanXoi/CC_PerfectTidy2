@@ -26,6 +26,9 @@ export class ItemSnap extends Component {
     @property({ type: Enum(FxType), tooltip: 'Sound effect played when successfully placed' })
     public fxTypeOnPlace: FxType = FxType.Complete;
 
+    @property({ tooltip: 'Phát thêm sound Aha cùng lúc với fxTypeOnPlace khi item snap trúng holder' })
+    public playAhaOnPlace: boolean = true;
+
     @property({ tooltip: 'Unique ID matching ItemHolder.id' })
     public id: number = 0;
 
@@ -59,7 +62,7 @@ export class ItemSnap extends Component {
     @property(Node)
     public shadowOnHolder: Node | null = null;
 
-    @property
+    @property({ tooltip: 'Hiện shadowOnHolder (bóng gợi ý ở holder đích) ngay khi bắt đầu kéo item' })
     public canShowShadowHint: boolean = true;
 
     @property
@@ -288,6 +291,12 @@ export class ItemSnap extends Component {
 
         this.ChangeState(ItemState.OnDrag);
 
+        // Gợi ý vị trí đích: bật shadow ở holder trong lúc kéo
+        // (miss -> ReturnOrDropOnMiss tắt lại, snap đúng -> giữ theo hideShadowOnDrop)
+        if (this.canShowShadowHint && this.shadowOnHolder) {
+            this.shadowOnHolder.active = true;
+        }
+
         // Scale nhân trực tiếp theo baseScale
         const targetScale = this.baseScale.clone().multiplyScalar(this.dragScaleMultiplier);
         tween(this.node)
@@ -391,7 +400,6 @@ export class ItemSnap extends Component {
         Tween.stopAllByTarget(this.node);
 
         (GameManager.Ins as any)?.OnItemPlaced?.(this);
-        this.PlaySoundOnPlace();
 
         // Notify ItemSpawnManager to spawn next item
         const vacatedPos = this.homeSlot ? this.homeSlot.worldPosition : this.waitingPosition;
@@ -429,6 +437,9 @@ export class ItemSnap extends Component {
             })
             .call(() => {
                 if (!this.node || !this.node.isValid) return;
+
+                // Âm thanh đặt đồ phát đúng lúc item chạm holder
+                this.PlaySoundOnPlace();
 
                 // Gán Item vào targetParent (holder.attachSlot hoặc holder.node)
                 this.node.setParent(targetParent);
@@ -597,6 +608,9 @@ export class ItemSnap extends Component {
 
     public PlaySoundOnPlace(): void {
         Ply_SoundManager.Ins?.PlayFx(this.fxTypeOnPlace);
+        if (this.playAhaOnPlace) {
+            Ply_SoundManager.Ins?.PlayFx(FxType.Aha);
+        }
     }
 
     /**
