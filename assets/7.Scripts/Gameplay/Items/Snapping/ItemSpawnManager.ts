@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Vec2, Vec3, Enum, Tween, tween, UITransform, math, director, Layers, UIOpacity } from 'cc';
+import { _decorator, Component, Node, Vec2, Vec3, Enum, Tween, tween, UITransform, math, director, Layers } from 'cc';
 import { Ply_Singleton } from '../../Framework/Ply_Singleton';
 import { ItemSnap, ItemState } from './ItemSnap';
 import { GameManager } from '../../Systems/GameManager';
@@ -12,6 +12,12 @@ export enum AreaSpawnMode {
     Manual = 1,                 // Chỉ spawn khi gọi SpawnNextItem() qua code
 }
 Enum(AreaSpawnMode);
+
+export enum InitialSpawnMode {
+    Animated = 0,               // Đợt đầu spawn như bình thường (bay từ hộp / scale up tại vị trí random)
+    PreplacedNoBobbing = 1,     // Đợt đầu hiện sẵn tại vị trí đặt trong editor, không nhấp nhô; kéo thả thì như bình thường
+}
+Enum(InitialSpawnMode);
 
 @ccclass('ItemSpawnManager')
 export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
@@ -74,8 +80,17 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     @property({ tooltip: 'Tự động spawn item khi bắt đầu game. Bỏ tích nếu muốn kích hoạt mở từ ItemBox' })
     public autoSpawnOnStart: boolean = true;
 
+    @property({ tooltip: 'Item hiện ra ở trạng thái chưa kéo được. Gọi EnableItemSnapDrag() từ chỗ khác (event / script) để mở khoá' })
+    public lockDragOnSpawn: boolean = false;
+
     @property({ min: 0, tooltip: 'Số item spawn ban đầu khi vào game / mỗi lần ItemBox click (nếu box không override). 0 = không spawn lúc start; ItemBox click sẽ spawn toàn bộ item còn lại' })
     public initialSpawnCount: number = 3;
+
+    @property({
+        type: Enum(InitialSpawnMode),
+        tooltip: 'Animated: đợt initialSpawnCount spawn như bình thường. PreplacedNoBobbing: đợt đầu hiện sẵn đúng vị trí đặt trong editor, không có bob effect; khi kéo thả thì hoạt động như bình thường'
+    })
+    public initialSpawnMode: InitialSpawnMode = InitialSpawnMode.Animated;
 
     // ==================== SPAWN FROM SOURCE (BOX) ====================
 
@@ -122,31 +137,25 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     @property({ tooltip: 'Punch (nảy scale) item một phát ngay khi snap đúng vào holder' })
     public enablePunchOnPlaced: boolean = true;
 
-    @property({ min: 1, tooltip: 'Hệ số scale đỉnh của punch (1.2 = phình to 20% rồi về lại)' })
-    public punchScale: number = 1.2;
+    @property({ range: [0.5, 1, 0.05], slide: true, tooltip: 'Punch bắt đầu khi item nhảy được bao nhiêu % quãng đường vào holder (0.9 = gần chạm nơi). 1 = chỉ punch sau khi đã đáp hẳn xuống' })
+    public punchStartJumpProgress: number = 0.9;
+
+    @property({ min: 1, tooltip: 'Hệ số scale trục X ở đỉnh punch: item bè ngang ra' })
+    public punchScaleX: number = 1.22;
+
+    @property({ range: [0.5, 1, 0.01], slide: true, tooltip: 'Hệ số scale trục Y ở đỉnh punch: bẹt xuống một chút. Đây mới là thứ tạo cảm giác squash & stretch thay vì chỉ phình to đều' })
+    public punchScaleY: number = 0.9;
+
+    @property({ range: [0, 1, 0.05], slide: true, tooltip: 'Độ mạnh của nhịp dội ngược (vươn cao, thon lại) sau khi bè ngang. 0 = bỏ nhịp này, punch chỉ còn 2 thì' })
+    public punchReboundRatio: number = 0.5;
 
     @property({ min: 0.05, tooltip: 'Tổng thời gian punch (giây)' })
     public punchDuration: number = 0.25;
 
     // =============================================================
 
-    @property({ tooltip: 'Bật hand tutorial tự động sau khi spawn item' })
+    @property({ tooltip: 'Đăng ký item vừa spawn cho HandTutManager để nó gợi ý kéo. Node hand, delay và giới hạn số item nằm ở HandTutManager (mục ITEMSNAP HINT)' })
     public enableSpawnHandTut: boolean = true;
-
-    @property({ type: Node, tooltip: 'Node hand dùng cho ItemSnap tutorial. Nếu để trống sẽ dùng HandTutManager.Ins.handNode' })
-    public handTutNode: Node | null = null;
-
-    @property({ min: 0, tooltip: 'Delay trước khi hiện hand tutorial sau lần spawn gần nhất (giây)' })
-    public handTutDelay: number = 7;
-
-    @property({ min: -1, step: 1, tooltip: 'Số item (khác nhau) được hand tut kéo gợi ý. -1 = không giới hạn, 0 = tắt' })
-    public maxHandTutItemCount: number = -1;
-
-    @property({ min: 0.01, tooltip: 'Thời gian hand di chuyển từ item tới holder' })
-    public handTutMoveDuration: number = 1.2;
-
-    @property({ min: 0, tooltip: 'Thời gian dừng giữa các vòng lặp hand tutorial' })
-    public handTutWaitAtEndDuration: number = 0.2;
 
     // ==================== WIN & STORE REDIRECT LOGIC ====================
 
@@ -179,15 +188,6 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     private placedItemCount: number = 0;
     private isReachedLimit: boolean = false;
     private spawnAreaTransform: UITransform | null = null;
-    private activeHandTutItem: ItemSnap | null = null;
-    private handTutToken: number = 0;
-    private handTutOpacity: UIOpacity | null = null;
-    private handTutDefaultAlpha: number = 255;
-    private handTutBoundItems: Set<ItemSnap> = new Set<ItemSnap>();
-    private hasShownInitialSpawnHandTut: boolean = false;
-    private initialHandTutRetryCount: number = 0;
-    private isSpawnHandTutShowing: boolean = false;   // hand node dùng chung với HandTutManager: chỉ tắt khi chính mình đang hiện
-    private handTutShownItems: Set<ItemSnap> = new Set<ItemSnap>();   // các item đã từng được hand tut (để giới hạn maxHandTutItemCount)
     private inFlightCount: number = 0;       // số item đang bay từ hộp, chưa tiếp đất
 
     public get PlacedItemCount(): number {
@@ -211,13 +211,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
             }
         }
 
-        if (!this.handTutNode) {
-            this.handTutNode = HandTutManager.Ins?.handNode || null;
-        }
-        if (this.handTutNode) {
-            this.handTutOpacity = this.handTutNode.getComponent(UIOpacity);
-            this.handTutDefaultAlpha = this.handTutOpacity?.opacity ?? 255;
-            this.handTutNode.active = false;
+        // Hand tut của ItemSnap do HandTutManager chạy; nó chỉ cần biết khi nào được phép gợi ý.
+        if (this.enableSpawnHandTut) {
+            HandTutManager.Ins?.SetItemSnapHintCondition(() => this.inFlightCount === 0 && !this.isReachedLimit);
         }
 
         // Ẩn các dynamic item khi vào game để chờ được spawn tuần tự
@@ -235,12 +231,8 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         }
     }
 
-    protected onDisable(): void {
-        this.cancelSpawnHandTut();
-    }
-
     protected onDestroy(): void {
-        this.cancelSpawnHandTut();
+        HandTutManager.Ins?.SetItemSnapHintCondition(null);
     }
 
     /**
@@ -308,11 +300,96 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
      */
     public RevealInitialItems(): void {
         if (this.initialSpawnCount > 0) {
-            this.SpawnBatch(this.initialSpawnCount);
+            if (this.initialSpawnMode === InitialSpawnMode.PreplacedNoBobbing) {
+                this.RevealPreplacedItems(this.initialSpawnCount);
+            } else {
+                this.SpawnBatch(this.initialSpawnCount);
+            }
         } else {
             this.onBatchLanded();
         }
         (GameManager.Ins as any)?.TriggerTutorial?.();
+    }
+
+    /**
+     * Hiện sẵn `count` item tiếp theo ngay tại vị trí / parent đã đặt trong editor:
+     * không bay, không scale up, không nhấp nhô. Kéo thả sau đó hoạt động như item spawn bình thường.
+     * @returns Số item thực tế đã hiện
+     */
+    public RevealPreplacedItems(count: number = 0): number {
+        const remaining = this.GetRemainingItemCount();
+        let countToReveal = count > 0 ? count : (this.initialSpawnCount > 0 ? this.initialSpawnCount : remaining);
+        countToReveal = Math.min(countToReveal, remaining);
+
+        let revealedCount = 0;
+        for (let i = 0; i < countToReveal; i++) {
+            if (this.revealNextItemPreplaced()) revealedCount++;
+        }
+
+        this.onBatchLanded();
+        return revealedCount;
+    }
+
+    /**
+     * Đồng bộ layer của item (và các node con) theo node cha chứa nó, mặc định UI_2D.
+     * Camera UI chỉ vẽ layer nằm trong visibility mask của nó, node con để layer DEFAULT sẽ bị cull.
+     */
+    private applyContainerLayer(itemNode: Node, container: Node | null): void {
+        const containerLayer = container?.layer || Layers.Enum.UI_2D;
+        itemNode.layer = containerLayer;
+        for (const child of itemNode.children) {
+            child.layer = containerLayer;
+        }
+    }
+
+    private revealNextItemPreplaced(): ItemSnap | null {
+        if (this.isReachedLimit || this.currentItemIndex >= this.dynamicItems.length) {
+            return null;
+        }
+
+        const item = this.dynamicItems[this.currentItemIndex];
+        this.currentItemIndex++;
+
+        if (!item || !item.node) {
+            return null;
+        }
+
+        const itemNode = item.node;
+        item.originalParent = itemNode.parent;
+        item.homeSlot = null;
+
+        Tween.stopAllByTarget(itemNode);
+        item.isSpawnInitialized = true;
+
+        // ItemSnap.start() would begin bobbing on activation; a pre-placed item stays still until dragged.
+        item.skipIdleBobbingOnStart = true;
+
+        // Phải bật node TRƯỚC: onLoad() của ItemSnap mới chạy và cache được scale/rotation đặt trong
+        // editor. Nếu gọi Apply* lúc node còn tắt thì baseScale/originalRotation vẫn là giá trị mặc
+        // định (1,1,1) / (0,0,0) và transform của item bị ghi sai.
+        itemNode.active = true;
+        item.enabled = true;
+        item.isDragLocked = this.lockDragOnSpawn;
+
+        item.ApplyRandomSpawnRotation();
+        item.ApplySpawnScale();
+        item.DisableAnimatorOnSpawn();
+
+        // Node con (Model chứa Sprite) hay bị để layer DEFAULT nên UICam (visibility = UI_2D) cull mất
+        // => item "biến mất" lúc play dù trong editor vẫn thấy. 2 luồng spawn kia đã chuẩn hoá layer,
+        // luồng preplaced trước đây thì không.
+        this.applyContainerLayer(itemNode, itemNode.parent);
+
+        // KHÔNG gọi BringToFront ở chế độ preplaced: giữ nguyên thứ tự sibling đã đặt trong editor.
+
+        item.waitingPosition = itemNode.worldPosition.clone();
+        (GameManager.Ins as any)?.AddItemToTutorial?.(item);
+        this.bindItemHandTutEvents(item);
+
+        item.ChangeState(ItemState.Waiting);
+        item.StopIdleBobbing();
+
+        return item;
     }
 
     /**
@@ -365,9 +442,38 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
      * Nếu vẫn còn item của đợt khác đang bay (click liên tục) thì chờ đợt cuối tiếp đất.
      */
     private onBatchLanded(): void {
-        if (this.inFlightCount > 0) return;
-        this.scheduleSpawnHandTut(true);
-        this.hasShownInitialSpawnHandTut = true;
+        if (this.inFlightCount > 0 || !this.enableSpawnHandTut) return;
+        HandTutManager.Ins?.StartHandTutNoDelay();
+    }
+
+    /**
+     * Mở khoá kéo thả cho toàn bộ ItemSnap. Gọi thủ công khi tới lúc cho người chơi
+     * động vào item (ví dụ sau khi lau xong, sau một đoạn cutscene...).
+     */
+    public EnableItemSnapDrag(): void {
+        this.SetItemSnapDragEnabled(true);
+    }
+
+    /** Khoá lại kéo thả cho toàn bộ ItemSnap. */
+    public DisableItemSnapDrag(): void {
+        this.SetItemSnapDragEnabled(false);
+    }
+
+    /**
+     * Đặt trạng thái kéo thả cho mọi ItemSnap trong dynamicItems. Cập nhật luôn lockDragOnSpawn
+     * để các item spawn sau đó đi theo trạng thái mới nhất thay vì quay lại giá trị đặt trong editor.
+     */
+    public SetItemSnapDragEnabled(canDrag: boolean): void {
+        this.lockDragOnSpawn = !canDrag;
+
+        for (const item of this.dynamicItems) {
+            if (item?.isValid) item.isDragLocked = !canDrag;
+        }
+
+        // Hand tut lọc ứng viên bằng ItemSnap.CanStartDrag nên item đang khoá kéo sẽ không được
+        // gợi ý. Đổi trạng thái xong thì nhắc HandTutManager tính lại từ đầu idle delay, thay vì
+        // để nó chờ hết chu kỳ cũ mới nhận ra là đã có item chơi được.
+        HandTutManager.Ins?.ResetHandTutDelay();
     }
 
     public get InFlightCount(): number {
@@ -404,12 +510,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         const targetContainer = this.itemsContainer || this.spawnAreaNode || this.node;
         const itemNode = item.node;
 
-        // Đảm bảo layer UI_2D để Camera UI nhìn thấy được
-        const containerLayer = targetContainer.layer || Layers.Enum.UI_2D;
-        itemNode.layer = containerLayer;
-        for (const child of itemNode.children) {
-            child.layer = containerLayer;
-        }
+        this.applyContainerLayer(itemNode, targetContainer);
 
         // Đặt parent
         if (itemNode.parent !== targetContainer) {
@@ -439,6 +540,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         item.BringToFront();
         itemNode.active = true;
         item.enabled = true;
+        item.isDragLocked = this.lockDragOnSpawn;
         item.ChangeState(ItemState.Waiting);
 
         tween(itemNode)
@@ -448,7 +550,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
                     item.StartIdleBobbing();
                 }
                 if (shouldScheduleHandTut) {
-                    this.scheduleSpawnHandTut();
+                    HandTutManager.Ins?.ResetHandTutDelay();
                 }
                 onComplete?.(item);
             })
@@ -484,11 +586,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         const containerUT = targetContainer.getComponent(UITransform) || targetContainer.addComponent(UITransform);
         const itemNode = item.node;
 
-        const containerLayer = targetContainer.layer || Layers.Enum.UI_2D;
-        itemNode.layer = containerLayer;
-        for (const child of itemNode.children) {
-            child.layer = containerLayer;
-        }
+        this.applyContainerLayer(itemNode, targetContainer);
 
         if (itemNode.parent !== targetContainer) {
             itemNode.setParent(targetContainer);
@@ -521,6 +619,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         item.BringToFront();
         itemNode.active = true;
         item.enabled = true;
+        item.isDragLocked = this.lockDragOnSpawn;
 
         // Đang bay: không cho kéo, không cho hand tut bám vào
         item.ChangeState(ItemState.Flying);
@@ -579,7 +678,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
                 (GameManager.Ins as any)?.AddItemToTutorial?.(item);
                 if (shouldScheduleHandTut) {
-                    this.scheduleSpawnHandTut();
+                    HandTutManager.Ins?.ResetHandTutDelay();
                 }
                 onComplete?.(item);
             })
@@ -592,7 +691,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
      * Kích hoạt Hand Tutorial ngay lập tức không có thời gian chờ (delay = 0).
      */
     public TriggerImmediateHandTut(): void {
-        this.scheduleSpawnHandTut(true);
+        HandTutManager.Ins?.StartHandTutNoDelay();
     }
 
     /**
@@ -603,11 +702,32 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
         const node = item.node;
         const base = node.scale.clone();
-        const peak = base.clone().multiplyScalar(this.punchScale);
+        const duration = Math.max(0.05, this.punchDuration);
+
+        // Thì 1 - bè: nở ngang theo X, bẹt xuống theo Y.
+        const squash = new Vec3(base.x * this.punchScaleX, base.y * this.punchScaleY, base.z);
+
+        const rebound = math.clamp01(this.punchReboundRatio);
+        if (rebound <= 0) {
+            tween(node)
+                .to(duration * 0.4, { scale: squash }, { easing: 'quadOut' })
+                .to(duration * 0.6, { scale: base }, { easing: 'backOut' })
+                .start();
+            return;
+        }
+
+        // Thì 2 - dội ngược: vươn cao, thon lại. Lấy đối xứng của thì 1 qua base rồi nhân
+        // reboundRatio, nên chỉnh punchScaleX/Y là hai thì tự khớp nhau, không lệch pha.
+        const stretch = new Vec3(
+            base.x * (1 - (this.punchScaleX - 1) * rebound),
+            base.y * (1 + (1 - this.punchScaleY) * rebound),
+            base.z,
+        );
 
         tween(node)
-            .to(this.punchDuration * 0.4, { scale: peak }, { easing: 'quadOut' })
-            .to(this.punchDuration * 0.6, { scale: base }, { easing: 'backOut' })
+            .to(duration * 0.35, { scale: squash }, { easing: 'quadOut' })
+            .to(duration * 0.30, { scale: stretch }, { easing: 'sineInOut' })
+            .to(duration * 0.35, { scale: base }, { easing: 'backOut' })
             .start();
     }
 
@@ -788,187 +908,28 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
             && localPos.y <= maxY;
     }
 
+    /** Giao item cho HandTutManager: nó tự bind event và tự chọn item để gợi ý. */
     private bindItemHandTutEvents(item: ItemSnap): void {
-        if (!item || this.handTutBoundItems.has(item)) return;
-
-        this.handTutBoundItems.add(item);
-        item.onStartDrag.addListener(() => {
-            this.cancelSpawnHandTut();
-        });
-        item.onPlacedSuccess.addListener(() => {
-            // Các item còn chờ trên màn vẫn được nhắc lại sau handTutDelay
-            this.scheduleSpawnHandTut();
-        });
-        item.onPlacedFail.addListener(() => {
-            this.scheduleSpawnHandTut();
-        });
+        if (!item || !this.enableSpawnHandTut) return;
+        HandTutManager.Ins?.AddItemSnap(item);
     }
 
-    private scheduleSpawnHandTut(noDelay: boolean = false): void {
-        if (!this.enableSpawnHandTut || !this.isValid) return;
-
-        this.unschedule(this.showSpawnHandTut);
-        this.hideSpawnHandTut();
-
-        if (noDelay) {
-            this.initialHandTutRetryCount = 0;
-            this.showSpawnHandTut();
-            return;
-        }
-
-        this.scheduleOnce(this.showSpawnHandTut, this.handTutDelay);
-    }
-
-    private showSpawnHandTut = (): void => {
-        if (!this.enableSpawnHandTut || !this.node.activeInHierarchy) return;
-
-        // Còn item đang bay thì chưa hiện hand; đợt tiếp đất xong sẽ tự gọi lại
-        if (this.inFlightCount > 0) return;
-
-        const shown = this.tryShowSpawnHandTut();
-
-        // No-delay initial hand tut có thể bị gọi sớm hơn lúc hand node sẵn sàng.
-        // Retry ngắn để đảm bảo vẫn hiện được hand đầu tiên.
-        if (!shown && !this.hasShownInitialSpawnHandTut && this.initialHandTutRetryCount < 20) {
-            this.initialHandTutRetryCount++;
-            this.scheduleOnce(this.showSpawnHandTut, 0.2);
-        }
-    };
-
-    private tryShowSpawnHandTut(): boolean {
-        const handNode = this.handTutNode || HandTutManager.Ins?.handNode || null;
-        if (!handNode || !handNode.isValid) return false;
-
-        const targetItem = this.getTopPriorityWaitingItem(true);
-        if (!targetItem || !targetItem.node || !targetItem.node.activeInHierarchy) return false;
-        this.handTutShownItems.add(targetItem);
-
-        const startPos = targetItem.node.worldPosition.clone();
-        const endPos = (targetItem.correctHolderTransform?.activeInHierarchy
-            ? targetItem.correctHolderTransform.worldPosition
-            : targetItem.node.worldPosition).clone();
-
-        this.activeHandTutItem = targetItem;
-        this.handTutNode = handNode;
-        this.handTutOpacity = handNode.getComponent(UIOpacity);
-
-        // Nhường hand: HandTutManager (nếu đang hiện hint khác) tắt hint của nó và tính lại delay
-        HandTutManager.Ins?.ResetHandTutDelay();
-
-        this.bringHandToFront();
-        this.handTutToken++;
-        const token = this.handTutToken;
-
-        this.isSpawnHandTutShowing = true;
-        handNode.active = true;
-        handNode.setWorldPosition(startPos);
-        this.setHandTutAlpha(this.handTutDefaultAlpha);
-
-        const loop = () => {
-            if (token !== this.handTutToken || !this.canContinueHandTut(targetItem)) {
-                this.hideSpawnHandTut();
-                return;
-            }
-
-            this.bringHandToFront();
-            handNode.setWorldPosition(targetItem.node.worldPosition);
-            this.setHandTutAlpha(this.handTutDefaultAlpha);
-
-            if (targetItem.correctHolderTransform?.activeInHierarchy) {
-                endPos.set(targetItem.correctHolderTransform.worldPosition);
-            } else {
-                endPos.set(targetItem.node.worldPosition);
-            }
-
-            tween(handNode)
-                .to(this.handTutMoveDuration, { worldPosition: endPos }, { easing: 'sineInOut' })
-                .call(() => this.setHandTutAlpha(0))
-                .delay(this.handTutWaitAtEndDuration)
-                .call(loop)
-                .start();
-        };
-
-        loop();
-        return true;
-    }
-
-    /**
-     * Item đang chờ có ưu tiên cao nhất (priority / sibling index).
-     * @param respectHandTutLimit true = chỉ xét item còn trong hạn mức maxHandTutItemCount
-     */
-    private getTopPriorityWaitingItem(respectHandTutLimit: boolean = false): ItemSnap | null {
-        // Bỏ qua item mà requiredItems của nó chưa được đặt (chưa thể snap được thì không gợi ý)
+    /** Item đang chờ nằm trên cùng (siblingIndex lớn nhất). ItemBox dùng để biết còn item trên màn hay không. */
+    private getTopPriorityWaitingItem(): ItemSnap | null {
+        // Bỏ qua item mà requiredItems của nó chưa được đặt (chưa thể snap được thì không tính)
         const candidates = this.dynamicItems.filter(item => {
             return !!item
                 && !!item.node
                 && item.node.activeInHierarchy
                 && item.enabled
                 && item.currentState === ItemState.Waiting
-                && item.CanPlaced()
-                && (!respectHandTutLimit || this.canHandTutItem(item));
+                && item.CanPlaced();
         });
 
         if (candidates.length === 0) return null;
 
-        candidates.sort((a, b) => {
-            const aut = a.getComponent(UITransform);
-            const but = b.getComponent(UITransform);
-            const ap = aut?.priority ?? 0;
-            const bp = but?.priority ?? 0;
-            if (ap !== bp) return bp - ap;
-
-            const ai = a.node.getSiblingIndex();
-            const bi = b.node.getSiblingIndex();
-            return bi - ai;
-        });
+        candidates.sort((a, b) => b.node.getSiblingIndex() - a.node.getSiblingIndex());
 
         return candidates[0];
-    }
-
-    /** Item còn trong hạn mức maxHandTutItemCount (-1 = không giới hạn). Item đã từng được hand tut luôn được phép tiếp. */
-    private canHandTutItem(item: ItemSnap): boolean {
-        if (this.maxHandTutItemCount < 0) return true;
-        if (this.handTutShownItems.has(item)) return true;
-        return this.handTutShownItems.size < this.maxHandTutItemCount;
-    }
-
-    private canContinueHandTut(item: ItemSnap): boolean {
-        return !!item
-            && !!item.node
-            && item.node.activeInHierarchy
-            && item.enabled
-            && item.currentState === ItemState.Waiting
-            && item.CanPlaced()
-            && !this.isReachedLimit;
-    }
-
-    private hideSpawnHandTut(): void {
-        if (!this.isSpawnHandTutShowing || !this.handTutNode || !this.handTutNode.isValid) return;
-        this.isSpawnHandTutShowing = false;
-        Tween.stopAllByTarget(this.handTutNode);
-        this.handTutNode.active = false;
-        this.setHandTutAlpha(this.handTutDefaultAlpha);
-    }
-
-    private cancelSpawnHandTut(): void {
-        this.unschedule(this.showSpawnHandTut);
-        this.handTutToken++;
-        this.activeHandTutItem = null;
-        this.hideSpawnHandTut();
-    }
-
-    private setHandTutAlpha(alpha: number): void {
-        if (!this.handTutNode) return;
-        if (!this.handTutOpacity || !this.handTutOpacity.isValid) {
-            this.handTutOpacity = this.handTutNode.getComponent(UIOpacity);
-        }
-        if (this.handTutOpacity) {
-            this.handTutOpacity.opacity = alpha;
-        }
-    }
-
-    private bringHandToFront(): void {
-        if (!this.handTutNode || !this.handTutNode.parent) return;
-        this.handTutNode.setSiblingIndex(this.handTutNode.parent.children.length - 1);
     }
 }

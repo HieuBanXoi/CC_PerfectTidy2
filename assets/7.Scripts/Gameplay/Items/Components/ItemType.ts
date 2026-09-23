@@ -15,10 +15,7 @@ export enum ItemType {
     WetItem,
     Paper,
     Trash,
-    PanCanStir,
-    Crust, PanStep1,
-    PanStep2,
-    PanStep3,
+    TrashBin,
 
 }
 Enum(ItemType);

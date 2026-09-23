@@ -92,6 +92,15 @@ export class ItemSnap extends Component {
     @property({ min: 0, tooltip: 'Độ cao vồng lên khi item nhảy vào holder lúc snap (0 = bay thẳng)' })
     public snapJumpHeight: number = 60;
 
+    @property({
+        range: [0, 1, 0.05], slide: true,
+        tooltip: 'Nhảy được bao nhiêu % quãng đường thì setParent item vào holder luôn (0.5 = giữa đường, 1 = chỉ gắn khi tiếp đất). Giữ nguyên world transform nên item không bị giật'
+    })
+    public reparentAtJumpProgress: number = 1;
+
+    @property({ tooltip: 'Scale local của item sau khi đặt lên holder: bật = baseScale (scale thiết kế của item), tắt = 1. Cú nhảy luôn tween thẳng tới giá trị này nên không bị giật ở cuối' })
+    public keepBaseScaleOnPlaced: boolean = true;
+
     @property({ min: 0.05 })
     public snapRotateDuration: number = 0.5;
 
@@ -125,6 +134,9 @@ export class ItemSnap extends Component {
     @property({ tooltip: 'Maximum random Z offset in degrees from original rotation' })
     public randomSpawnAngleMax: number = 30;
 
+    @property({ tooltip: 'Khi thả item ra mà không trúng holder: xoay sang một góc Z ngẫu nhiên mới (dùng chung dải randomSpawnAngleMin/Max) thay vì trả về góc gốc' })
+    public randomRotationOnDrop: boolean = true;
+
     public originalParent: Node | null = null;
     private originalScale: Vec3 = new Vec3(1, 1, 1);
     private originalRotation: Vec3 = new Vec3(0, 0, 0);
@@ -137,6 +149,14 @@ export class ItemSnap extends Component {
     private isBobbing: boolean = false;
     private hasCachedOriginals: boolean = false;
     public isSpawnInitialized: boolean = false;
+    /**
+     * Khoá kéo thả tạm thời: item vẫn hiện, vẫn Waiting nhưng không nhấc lên được.
+     * ItemSpawnManager bật cờ này lúc spawn khi lockDragOnSpawn = true, và gỡ ra
+     * trong EnableItemSnapDrag().
+     */
+    public isDragLocked: boolean = false;
+    /** Set by ItemSpawnManager for pre-placed items: start() must not begin idle bobbing (a later miss-drop still bobs). */
+    public skipIdleBobbingOnStart: boolean = false;
 
     protected onLoad(): void {
         // this.tf = this.node;
@@ -158,9 +178,15 @@ export class ItemSnap extends Component {
             this.currentState = ItemState.Waiting;
         }
 
-        if (this.enableIdleBobbing && this.currentState === ItemState.Waiting && this.node.activeInHierarchy) {
+        if (this.enableIdleBobbing && !this.skipIdleBobbingOnStart && this.currentState === ItemState.Waiting && this.node.activeInHierarchy) {
             this.StartIdleBobbing();
         }
+        this.skipIdleBobbingOnStart = false;
+    }
+
+    /** Item có đang ở trạng thái nhấc lên kéo được không (InputManager dùng để lọc touch). */
+    public get CanStartDrag(): boolean {
+        return this.enabled && !this.isDragLocked && this.currentState === ItemState.Waiting;
     }
 
     public GetWaitingScale(): Vec3 {
@@ -176,20 +202,25 @@ export class ItemSnap extends Component {
         this.node.setScale(scale);
     }
 
+    /** Góc gốc cộng thêm một offset Z ngẫu nhiên trong dải randomSpawnAngleMin/Max. */
+    public GetRandomEuler(): Vec3 {
+        const min = Math.min(this.randomSpawnAngleMin, this.randomSpawnAngleMax);
+        const max = Math.max(this.randomSpawnAngleMin, this.randomSpawnAngleMax);
+        return new Vec3(
+            this.originalRotation.x,
+            this.originalRotation.y,
+            this.originalRotation.z + math.randomRange(min, max)
+        );
+    }
+
     public ApplyRandomSpawnRotation(): void {
         if (!this.randomRotationOnSpawn) {
             this.node.setRotationFromEuler(this.originalRotation.x, this.originalRotation.y, this.originalRotation.z);
             return;
         }
 
-        const min = Math.min(this.randomSpawnAngleMin, this.randomSpawnAngleMax);
-        const max = Math.max(this.randomSpawnAngleMin, this.randomSpawnAngleMax);
-        const randomOffset = math.randomRange(min, max);
-        this.node.setRotationFromEuler(
-            this.originalRotation.x,
-            this.originalRotation.y,
-            this.originalRotation.z + randomOffset
-        );
+        const euler = this.GetRandomEuler();
+        this.node.setRotationFromEuler(euler.x, euler.y, euler.z);
     }
 
     private cacheOriginalTransform(): void {
@@ -233,29 +264,21 @@ export class ItemSnap extends Component {
         if (this.itemSkelAnimation) this.itemSkelAnimation.enabled = true;
     }
 
-    private static globalTopPriority: number = 1000;
-
+    /**
+     * Thứ tự vẽ UI 2D đi theo siblingIndex. KHÔNG dùng UITransform.priority: API này đã deprecated
+     * từ 3.1 và setter của nó còn bắt engine sort lại toàn bộ children của node cha ở cuối frame,
+     * ghi đè luôn siblingIndex mình vừa đặt.
+     */
     public SetSortingOrder(order: number): void {
-        const ut = this.getComponent(UITransform);
-        if (ut) {
-            ut.priority = order;
-        }
-        if (this.node.parent) {
-            this.node.setSiblingIndex(this.node.parent.children.length - 1);
-        }
+        const parent = this.node.parent;
+        if (!parent) return;
+        const maxIndex = parent.children.length - 1;
+        this.node.setSiblingIndex(math.clamp(order, 0, maxIndex));
     }
 
     public BringToFront(): void {
-        ItemSnap.globalTopPriority += 10;
-        const currentOrder = ItemSnap.globalTopPriority;
-
         if (GameManager.Ins) {
-            GameManager.Ins.currentLayer = Math.max(GameManager.Ins.currentLayer + 1, currentOrder);
-        }
-
-        const ut = this.getComponent(UITransform);
-        if (ut) {
-            ut.priority = currentOrder;
+            GameManager.Ins.currentLayer++;
         }
 
         if (this.node.parent) {
@@ -264,7 +287,7 @@ export class ItemSnap extends Component {
     }
 
     public StartDrag(touchWorldPos?: Vec3): void {
-        if (!this.enabled || this.currentState !== ItemState.Waiting) return;
+        if (!this.CanStartDrag) return;
 
         Ply_SoundManager.Ins?.PlayFx(FxType.Click);
         this.StopIdleBobbing();
@@ -395,6 +418,14 @@ export class ItemSnap extends Component {
         return bestCandidate;
     }
 
+    /** backOut giống easing backOut của Tween: vọt quá đích một chút rồi lùi về đúng 1 tại t = 1. */
+    private static EaseBackOut(t: number): number {
+        const c1 = 1.70158;
+        const c3 = c1 + 1;
+        const u = t - 1;
+        return 1 + c3 * u * u * u + c1 * u * u;
+    }
+
     private PlaceOnHolder(holder: ItemHolder): void {
         this.ChangeState(ItemState.MoveToCorrectPos);
         Tween.stopAllByTarget(this.node);
@@ -413,16 +444,49 @@ export class ItemSnap extends Component {
         const targetPos = (holder.attachSlot ? holder.attachSlot.worldPosition : holder.node.worldPosition).clone();
         const targetEuler = (holder.attachSlot ? holder.attachSlot.eulerAngles : holder.node.eulerAngles).clone();
 
-        // Tween scale về baseScale
-        tween(this.node)
-            .to(this.snapDuration, { scale: this.baseScale }, { easing: 'backOut' })
-            .start();
-
         // Nhảy vồng parabol vào holder cho sinh động
         const startWorld = this.node.worldPosition.clone();
         const endWorld = new Vec3(targetPos.x, targetPos.y, startWorld.z);
         const snapAnim = { t: 0 };
         const snapTemp = new Vec3();
+
+        // Scale đích tính theo LOCAL của holder, còn cú nhảy thì nội suy theo WORLD scale.
+        // Nhờ vậy lúc đổi parent giữa chừng (keepWorldTransform) kích thước hiển thị không đổi,
+        // và khi tới đích local scale rơi đúng endLocalScale nên không cần set cứng lần cuối.
+        const endLocalScale = this.keepBaseScaleOnPlaced ? this.baseScale.clone() : new Vec3(1, 1, 1);
+        const startWorldScale = this.node.worldScale.clone();
+        const parentWorldScale = targetParent.worldScale;
+        const endWorldScale = new Vec3(
+            parentWorldScale.x * endLocalScale.x,
+            parentWorldScale.y * endLocalScale.y,
+            parentWorldScale.z * endLocalScale.z,
+        );
+        const scaleTemp = new Vec3();
+
+        // Ngưỡng % quãng đường để gắn item vào holder ngay giữa chừng (1 = chỉ gắn khi tiếp đất)
+        const reparentAt = math.clamp01(this.reparentAtJumpProgress);
+        let hasReparented = false;
+
+        // Punch chạy trên LOCAL scale và còn kéo dài sau khi cú nhảy kết thúc, nên nó phải
+        // giành quyền điều khiển scale: từ lúc punch bắt đầu, onUpdate thôi ghi world scale.
+        const punchAt = spawnMgr?.enablePunchOnPlaced
+            ? math.clamp01(spawnMgr.punchStartJumpProgress ?? 1)
+            : 1;
+        let hasPunched = false;
+        const attachToHolder = () => {
+            if (hasReparented) return;
+            hasReparented = true;
+
+            // Luôn giữ world transform: kích thước và vị trí hiển thị không đổi tại thời điểm đổi
+            // parent, phần bay còn lại vẫn do onUpdate điều khiển bằng world position / world scale.
+            this.node.setParent(targetParent, true);
+
+            // Chèn vào vị trí sibling cụ thể nếu được cấu hình (ví dụ: nằm giữa Back và Front)
+            if (holder.insertSiblingIndex >= 0) {
+                const clampedIdx = Math.min(holder.insertSiblingIndex, targetParent.children.length - 1);
+                this.node.setSiblingIndex(clampedIdx);
+            }
+        };
 
         tween(snapAnim)
             .to(this.snapDuration, { t: 1 }, {
@@ -430,9 +494,29 @@ export class ItemSnap extends Component {
                 onUpdate: () => {
                     if (!this.node || !this.node.isValid) return;
                     const t = snapAnim.t;
+
+                    // Gắn vào holder ngay khi nhảy đủ % quãng đường
+                    if (!hasReparented && reparentAt < 1 && t >= reparentAt) {
+                        attachToHolder();
+                    }
+
                     Vec3.lerp(snapTemp, startWorld, endWorld, t);
                     snapTemp.y += this.snapJumpHeight * Math.sin(math.clamp01(t) * Math.PI);
                     this.node.setWorldPosition(snapTemp);
+
+                    if (!hasPunched) {
+                        Vec3.lerp(scaleTemp, startWorldScale, endWorldScale, ItemSnap.EaseBackOut(t));
+                        this.node.setWorldScale(scaleTemp);
+                    }
+
+                    // Gần chạm holder thì bắt đầu punch. Phải vào đúng parent trước vì punch
+                    // tween theo local scale; setParent giữ world transform nên không thấy nhảy.
+                    if (!hasPunched && punchAt < 1 && t >= punchAt) {
+                        hasPunched = true;
+                        attachToHolder();
+                        this.node.setScale(endLocalScale);
+                        spawnMgr.PunchItem(this);
+                    }
                 }
             })
             .call(() => {
@@ -441,23 +525,22 @@ export class ItemSnap extends Component {
                 // Âm thanh đặt đồ phát đúng lúc item chạm holder
                 this.PlaySoundOnPlace();
 
-                // Gán Item vào targetParent (holder.attachSlot hoặc holder.node)
-                this.node.setParent(targetParent);
+                // Gán Item vào targetParent (holder.attachSlot hoặc holder.node) nếu chưa gắn giữa chừng
+                attachToHolder();
                 this.node.setPosition(Vec3.ZERO);
                 this.node.setRotationFromEuler(0, 0, 0);
-                this.node.setScale(Vec3.ONE);
-
-                // Chèn vào vị trí sibling cụ thể nếu được cấu hình (ví dụ: nằm giữa Back và Front)
-                if (holder.insertSiblingIndex >= 0) {
-                    const clampedIdx = Math.min(holder.insertSiblingIndex, targetParent.children.length - 1);
-                    this.node.setSiblingIndex(clampedIdx);
+                // Punch đang sở hữu scale thì để yên, nó tự tween về endLocalScale khi xong.
+                if (!hasPunched) {
+                    // Trùng đúng giá trị mà onUpdate vừa chạy tới nên không tạo cú nhảy scale nào.
+                    this.node.setScale(endLocalScale);
                 }
 
                 this.SpawnVFX();
                 this.EnableAnimatorWhenPlaced();
 
-                // Punch item một phát khi snap đúng (bật/tắt trong ItemSpawnManager)
-                if (spawnMgr && typeof spawnMgr.PunchItem === 'function') {
+                // Punch item một phát khi snap đúng (bật/tắt trong ItemSpawnManager).
+                // Bỏ qua nếu punch đã chạy từ giữa cú nhảy.
+                if (!hasPunched && spawnMgr && typeof spawnMgr.PunchItem === 'function') {
                     spawnMgr.PunchItem(this);
                 }
 
@@ -473,6 +556,9 @@ export class ItemSnap extends Component {
 
                 (GameManager.Ins as any)?.RemoveItemFromTutorial?.(this);
                 this.ChangeState(ItemState.OnGoal);
+
+                // Item đã về đúng chỗ: tính 1 nước đi.
+                GameManager.Ins?.MoveOne();
 
                 // Tắt component và collider để không thể click/kéo được nữa
                 this.enabled = false;
@@ -506,13 +592,14 @@ export class ItemSnap extends Component {
         const p = this.node.position;
         this.node.setPosition(p.x, p.y, 0);
 
-        // 4. Tween scale và xoay về ban đầu
+        // 4. Tween scale về ban đầu; góc xoay thì lệch sang một góc ngẫu nhiên mới mỗi lần thả
         const returnScale = this.GetWaitingScale();
         tween(this.node)
             .to(this.dragScaleDuration, { scale: returnScale }, { easing: 'backOut' })
             .start();
 
-        this.TweenRotationTo(this.originalRotation, this.dragScaleDuration, 'sineOut');
+        const dropEuler = this.randomRotationOnDrop ? this.GetRandomEuler() : this.originalRotation;
+        this.TweenRotationTo(dropEuler, this.dragScaleDuration, 'sineOut');
 
         if (this.returnToSlotOnMiss) {
             const returnTarget = this.homeSlot ? this.homeSlot.worldPosition : this.waitingPosition;

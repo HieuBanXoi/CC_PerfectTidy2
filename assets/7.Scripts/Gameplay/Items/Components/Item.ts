@@ -307,6 +307,15 @@ export class Item extends Ply_GameUnit {
         this.SpawnHeart();
     }
 
+    /**
+     * Node mà hand tut nên kéo tới. Mặc định là ItemMoveToTarget.defaultTarget; lớp con ghi đè
+     * khi đích thay đổi theo trạng thái - CleanItem trỏ tới vết bẩn chưa lau xong.
+     * Trả về null nghĩa là item này hiện không có đích hợp lệ, hand tut sẽ bỏ qua nó.
+     */
+    public GetHandTutTarget(): Node | null {
+        return this.itemMoveToTarget?.defaultTarget ?? null;
+    }
+
     public ItemDone() {
         HandTutManager.Ins?.ItemDone(this);
     }

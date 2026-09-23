@@ -15,7 +15,8 @@ export enum FxType {
     CleanItemAppear,
     Aha,
     SoftPlace, PlaceCan, PlaceWood, PlaceMetal, PlaceLeather,
-    PlaceBag
+    PlaceBag,
+    Swipe
     
     
 }

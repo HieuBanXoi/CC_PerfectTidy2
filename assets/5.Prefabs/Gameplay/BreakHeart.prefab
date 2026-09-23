@@ -3,6 +3,7 @@
     "__type__": "cc.Prefab",
     "_name": "BreakHeart",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "_native": "",
     "data": {
       "__id__": 1
@@ -53,7 +54,7 @@
       "z": 1
     },
     "_mobility": 0,
-    "_layer": 33554432,
+    "_layer": 1,
     "_euler": {
       "__type__": "cc.Vec3",
       "x": 0,
@@ -66,6 +67,7 @@
     "__type__": "cc.Node",
     "_name": "Model",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "_parent": {
       "__id__": 1
     },
@@ -103,7 +105,7 @@
       "z": 1
     },
     "_mobility": 0,
-    "_layer": 33554432,
+    "_layer": 1,
     "_euler": {
       "__type__": "cc.Vec3",
       "x": 0,
@@ -116,6 +118,7 @@
     "__type__": "cc.Node",
     "_name": "Heart 1_0",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "_parent": {
       "__id__": 2
     },
@@ -152,7 +155,7 @@
       "z": 0.244
     },
     "_mobility": 0,
-    "_layer": 33554432,
+    "_layer": 1,
     "_euler": {
       "__type__": "cc.Vec3",
       "x": 0,
@@ -165,6 +168,7 @@
     "__type__": "cc.UITransform",
     "_name": "",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "node": {
       "__id__": 3
     },
@@ -192,6 +196,7 @@
     "__type__": "cc.Sprite",
     "_name": "",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "node": {
       "__id__": 3
     },
@@ -249,6 +254,7 @@
     "__type__": "cc.UITransform",
     "_name": "",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "node": {
       "__id__": 2
     },
@@ -289,6 +295,7 @@
     "__type__": "cc.UITransform",
     "_name": "",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "node": {
       "__id__": 1
     },
@@ -316,6 +323,7 @@
     "__type__": "af925ibFq1CDaGN+rEbY2Dk",
     "_name": "",
     "_objFlags": 0,
+    "__editorExtras__": {},
     "node": {
       "__id__": 1
     },

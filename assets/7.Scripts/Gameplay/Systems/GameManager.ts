@@ -28,7 +28,12 @@ export class GameManager extends Ply_Singleton<GameManager> {
     public isLoseGame: boolean = false;
 
     @property
+    public maxMoves: number = 10;
+
+    @property
     public countMove: number = 0;
+    @property
+    public goToStoreOnMaxMoves: boolean = true;
 
     @property({ tooltip: 'Show a browser confirmation dialog before redirecting to the store in Web Preview only.' })
     public showStoreDialogInWebPreview = true;
@@ -131,9 +136,11 @@ export class GameManager extends Ply_Singleton<GameManager> {
 
     public MoveOne() {
         this.countMove++;
-        if (this.countMove === 100) {
-            this.isPlaying = false;
-            this.isGotoStore = true;
+        if (this.countMove === this.maxMoves) {
+            if (this.goToStoreOnMaxMoves) {
+                this.GotoStore();
+            }
+            this.StopGame();
         }
     }
 

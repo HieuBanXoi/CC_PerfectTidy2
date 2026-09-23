@@ -332,7 +332,7 @@ export class InputManager extends Ply_Singleton<InputManager> {
         let itemInteracted = false;
 
         const snapItem = this.getTouchedComponent(event, ItemSnap);
-        if (snapItem && snapItem.enabled && snapItem.currentState === ItemState.Waiting && isPlaying) {
+        if (snapItem && snapItem.CanStartDrag && isPlaying) {
             const touchPos = event.getUILocation();
             this.BeginDragSnapItem(snapItem, new Vec3(touchPos.x, touchPos.y, 0));
             itemInteracted = true;

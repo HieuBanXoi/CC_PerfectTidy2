@@ -163,7 +163,7 @@ export class WebCleaner extends Item {
 
         this.hasCompletedAllWebs = true;
         this.ItemDone();
-        (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
+        (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone(this);
     }
 
     /** Points Item's drag tutorial at the next web that still needs sweeping. */

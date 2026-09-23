@@ -1,4 +1,4 @@
-import { _decorator, Node, Tween, tween, Vec2, Vec3, Enum, EventTouch, UITransform } from 'cc';
+import { _decorator, Node, Tween, tween, Vec2, Vec3, Enum, EventTouch, UITransform, math } from 'cc';
 import { Ply_SoundManager, FxType } from '../../Framework/Ply_SoundManager';
 import { Ply_Event } from '../../Framework/Ply_Event';
 import { InputManager } from '../../../Core/Managers/InputManager';
@@ -24,6 +24,9 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
     @property
     public returnToStartOnDragFailed: boolean = true;
 
+    @property({ tooltip: 'Khi returnToStartOnDragFailed = false: giữ item lại trong InputManager.draggingNode (không trả về parent / sibling cũ) để nó luôn hiện trên các item khác' })
+    public keepInDraggingNodeOnDropFail: boolean = false;
+
     @property
     public returnToExactReturnTransformPosition: boolean = true;
 
@@ -44,6 +47,18 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
 
     @property
     public spawnBreakHeartOnDropFail: boolean = true;
+
+    @property({ tooltip: 'Khi thả item ra mà không trúng target (item nằm lại tại chỗ): xoay sang một góc Z ngẫu nhiên. Áp dụng cho cả trash' })
+    public randomRotationOnDropFail: boolean = true;
+
+    @property({ tooltip: 'Offset Z ngẫu nhiên tối thiểu (độ) so với góc gốc lúc onLoad' })
+    public randomDropAngleMin: number = -30;
+
+    @property({ tooltip: 'Offset Z ngẫu nhiên tối đa (độ) so với góc gốc lúc onLoad' })
+    public randomDropAngleMax: number = 30;
+
+    @property({ min: 0.01, tooltip: 'Thời gian tween xoay ngẫu nhiên khi thả trượt (giây)' })
+    public randomDropRotationDuration: number = 0.2;
 
     @property
     public playBeginDragSound: boolean = true;
@@ -93,6 +108,7 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
 
     private cachedReturnPosition: Vec3 = new Vec3();
     private hasCachedReturnPosition: boolean = false;
+    private originalEuler: Vec3 = new Vec3();
 
     public get IsDragging(): boolean {
         return this.isDraggingSession;
@@ -116,6 +132,7 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
         Vec3.copy(this.originalLocalPos, this.node.position);
         Vec3.copy(this.originalScale, this.node.scale);
         Vec3.copy(this.originalWorldPos, this.node.worldPosition);
+        Vec3.copy(this.originalEuler, this.node.eulerAngles);
 
         // Ensure node has a valid UITransform for touch events.
         let uiTransform = this.getComponent(UITransform);
@@ -237,7 +254,16 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
 
         const dropTarget = this.FindMatchingDropTarget();
         if (!dropTarget) {
-            this.ResetScale();
+            // ResetScale() gọi RestoreOriginalParent() nên nếu chạy ở đây thì item đã bị kéo khỏi
+            // draggingNode trước khi FinalizeFailedDrag() kịp kiểm tra => keepInDraggingNodeOnDropFail
+            // không bao giờ có tác dụng và sibling cũ vẫn bị set lại. Trash rơi đúng vào trường hợp này.
+            const willStayInDraggingNode = !this.returnToStartOnDragFailed && this.keepInDraggingNodeOnDropFail;
+            if (willStayInDraggingNode) {
+                // Scale được FinalizeFailedDrag() set lại theo world scale của parent gốc.
+                Tween.stopAllByTarget(this.node);
+            } else {
+                this.ResetScale();
+            }
             this.onDropFail.invoke();
             if (!this.consumeCurrentDropFail) {
                 // Show the failure feedback at the rejected drop position,
@@ -249,7 +275,10 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
                 if (this.returnToStartOnDragFailed) {
                     this.ReturnToStart(false);
                 } else {
-                    this.FinalizeFailedDrag(false);
+                    // Item nằm lại đúng chỗ vừa thả nên cho nó nghiêng sang một góc ngẫu nhiên.
+                    // Item bay về chỗ cũ thì giữ nguyên góc gốc.
+                    this.ApplyRandomDropRotation();
+                    this.FinalizeFailedDrag(false, this.keepInDraggingNodeOnDropFail);
                 }
             } else {
                 this.SetShadowActive(true);
@@ -435,14 +464,77 @@ export class ItemDraggable extends Ply_EventHandlerComponent {
         }
     }
 
-    private FinalizeFailedDrag(spawnHeart: boolean) {
+    /** Góc xoay của item lúc onLoad (trước mọi lần kéo thả). */
+    public get OriginalEuler(): Vec3 {
+        return this.originalEuler.clone();
+    }
+
+    /** Xoay item sang góc Z ngẫu nhiên quanh góc gốc. */
+    public ApplyRandomDropRotation(): void {
+        if (!this.randomRotationOnDropFail || !this.node?.isValid) return;
+
+        const min = Math.min(this.randomDropAngleMin, this.randomDropAngleMax);
+        const max = Math.max(this.randomDropAngleMin, this.randomDropAngleMax);
+        this.TweenEulerZTo(this.originalEuler.z + math.randomRange(min, max), this.randomDropRotationDuration);
+    }
+
+    /** Xoay item về đúng góc gốc lúc onLoad (dùng khi item bay về đích và cần đứng thẳng lại). */
+    public RestoreOriginalRotation(duration: number = 0.2): void {
+        this.TweenEulerZTo(this.originalEuler.z, duration);
+    }
+
+    /**
+     * Tween góc Z của node về targetZ, X/Y kéo về góc gốc. Đi theo cung ngắn nhất quanh trục Z
+     * để không bị quay vòng 360 khi góc hiện tại và góc đích lệch nhau qua mốc 180 độ.
+     */
+    private TweenEulerZTo(targetZ: number, duration: number): void {
+        if (!this.node?.isValid) return;
+
+        const startEuler = this.node.eulerAngles.clone();
+        let diffZ = (targetZ - startEuler.z) % 360;
+        if (diffZ > 180) diffZ -= 360;
+        if (diffZ < -180) diffZ += 360;
+        const endZ = startEuler.z + diffZ;
+
+        const rotState = { t: 0 };
+        tween(rotState)
+            .to(Math.max(0.01, duration), { t: 1 }, {
+                easing: 'sineOut',
+                onUpdate: () => {
+                    if (!this.node?.isValid) return;
+                    this.node.setRotationFromEuler(
+                        math.lerp(startEuler.x, this.originalEuler.x, rotState.t),
+                        math.lerp(startEuler.y, this.originalEuler.y, rotState.t),
+                        math.lerp(startEuler.z, endZ, rotState.t),
+                    );
+                }
+            })
+            .call(() => {
+                if (!this.node?.isValid) return;
+                this.node.setRotationFromEuler(this.originalEuler.x, this.originalEuler.y, endZ);
+            })
+            .start();
+    }
+
+    private FinalizeFailedDrag(spawnHeart: boolean, stayInDraggingNode: boolean = false) {
         this.isForceReturningToStart = false;
         this.isReturningToStart = false;
-        this.RestoreOriginalParent();
-        // Always finish with the item's original local scale. This covers
-        // returnTransform/cached-position flows, which reparent only here.
-        this.node.setScale(this.originalScale);
-        this.RestoreOriginalSiblingIndex();
+        if (stayInDraggingNode && this.node.parent === InputManager.Ins?.draggingNode) {
+            // Stay under draggingNode so the item keeps rendering above everything
+            // else, but match the world scale it would have under its original parent.
+            const parentScale = this.originalParent?.isValid ? this.originalParent.worldScale : Vec3.ONE;
+            this.node.setWorldScale(
+                parentScale.x * this.originalScale.x,
+                parentScale.y * this.originalScale.y,
+                parentScale.z * this.originalScale.z,
+            );
+        } else {
+            this.RestoreOriginalParent();
+            // Always finish with the item's original local scale. This covers
+            // returnTransform/cached-position flows, which reparent only here.
+            this.node.setScale(this.originalScale);
+            this.RestoreOriginalSiblingIndex();
+        }
         this.SetShadowActive(true);
         this.PlayReturnToStartFinishSound();
         this.onReturnToStartComplete.invoke();

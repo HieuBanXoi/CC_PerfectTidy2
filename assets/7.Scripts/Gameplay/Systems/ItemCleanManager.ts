@@ -1,6 +1,7 @@
-import { _decorator, Component, Node, Tween, tween, Vec3 } from 'cc';
+import { _decorator, Component, Enum, Node, Tween, tween, Vec3 } from 'cc';
 import type { CloudEffect } from '../Effects/CloudEffect';
 import type { Item } from '../Items/Components/Item';
+import type { CleanItem } from '../Cleaning/CleanItem';
 import { PoolType } from '../../Core/Pooling/PoolMember';
 import { World } from '../../Core/Managers/World';
 import { ipm } from '../../Core/Managers/InputManager';
@@ -11,9 +12,21 @@ import { HandTutManager } from './HandTutManager';
 
 const { ccclass, property } = _decorator;
 
+export enum CleanItemDisplayMode {
+    /** Hiện từng item một; item lau xong thì thu nhỏ biến mất rồi item kế tiếp hiện ra. */
+    Sequential = 0,
+    /** Hiện sẵn toàn bộ item ngay từ đầu; item lau xong vẫn nằm nguyên trên màn hình. */
+    ShowAll = 1,
+}
+Enum(CleanItemDisplayMode);
+
 /**
- * Shows cleaning items one at a time. Call ItemCleanDone() when the current
- * item has been cleaned to hide it and reveal the next configured item.
+ * Drives the cleaning items. Call ItemCleanDone() when the current item has been
+ * cleaned to advance to the next configured item.
+ *
+ * Both display modes walk `items` in the same order and fire onAllItemsCleaned
+ * after the last one; they only differ in whether items are shown one at a time
+ * (Sequential) or all at once and left on screen when finished (ShowAll).
  */
 @ccclass('ItemCleanManager')
 export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
@@ -24,6 +37,16 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
 
     @property({ tooltip: 'Show the first item automatically when this manager starts.' })
     public autoStart = true;
+
+    @property({
+        type: Enum(CleanItemDisplayMode),
+        tooltip: 'Sequential: hiện lần lượt, lau xong item nào thì item đó biến mất. ShowAll: hiện sẵn tất cả item, lau xong vẫn giữ nguyên trên màn hình. Cả hai đều đi theo đúng thứ tự trong mảng items'
+    })
+    public displayMode: CleanItemDisplayMode = CleanItemDisplayMode.Sequential;
+
+    @property({ tooltip: 'Chỉ dùng cho ShowAll: component nào tự khai báo SetInteractable() (hiện tại là TrashBin) thì bị khoá tương tác cho tới đúng lượt của nó. Các item còn lại luôn tương tác được' })
+    public gateInteractableItemsByTurn = true;
+
 
     @property({ min: 0.01, tooltip: 'Zoom duration used when an item appears or disappears.' })
     public zoomDuration = 0.25;
@@ -68,6 +91,11 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         super.onLoad();
         this.cacheItemScales();
         this.setAllItemsInactive();
+
+        // Khoá ngay từ onLoad chứ không đợi RevealAllItems() trong start(): node trash nằm ngoài
+        // mảng `items` nên setAllItemsInactive() không đụng tới, chúng vẫn active và kéo được
+        // trong quãng giữa lúc scene load xong và lúc start() chạy.
+        this.applyTurnGate();
     }
 
     protected start(): void {
@@ -87,11 +115,78 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         this.currentItemIndex = -1;
         this.isTransitioning = false;
         this.hasCompletedSequence = false;
+
+        if (this.displayMode === CleanItemDisplayMode.ShowAll) {
+            this.RevealAllItems();
+        }
+
         this.ShowNextItem();
     }
 
-    /** Hides the active item, then displays the next one in the array. */
-    public ItemCleanDone(): void {
+    /** ShowAll: bung toàn bộ item cùng lúc, mỗi item vẫn có hiệu ứng zoom + cloud như cũ. */
+    private RevealAllItems(): void {
+        let hasRevealedAny = false;
+
+        for (const item of this.items) {
+            if (!item || !item.isValid) continue;
+
+            const targetScale = this.getItemScale(item);
+            item.node.active = true;
+            item.node.setScale(this.getZeroScale(item));
+            this.SpawnItemShowCloud(item);
+
+            // Tween riêng cho từng node, không giữ vào activeTween (chỗ đó chỉ chứa được 1 tween).
+            // setAllItemsInactive() đã Tween.stopAllByTarget từng node nên không sợ chồng tween.
+            tween(item.node)
+                .to(this.zoomDuration, { scale: targetScale }, { easing: 'backOut' })
+                .start();
+
+            hasRevealedAny = true;
+        }
+
+        // Một tiếng cho cả đợt, thay vì N tiếng chồng lên nhau.
+        if (hasRevealedAny) Ply_SoundManager.Ins?.PlayFx(FxType.CleanItemAppear);
+
+        // currentItemIndex vẫn là -1 ở đây nên gate khoá sạch; ShowNextItem() ngay sau đó
+        // set lại index rồi mở khoá đúng item của lượt đầu tiên.
+        this.applyTurnGate();
+    }
+
+    /**
+     * Khoá / mở khoá tương tác cho một item của danh sách. Cố ý chỉ đụng tới component nào tự
+     * khai báo SetInteractable() - hiện chỉ TrashBin, nơi việc dọn rác sớm sẽ phá vỡ thứ tự lượt.
+     * Các item khác (CleanItem...) không bị khoá: lau sớm một item không gây hỏng chuỗi vì
+     * shouldSkipItem() đã bỏ qua item đã sạch khi chuyển lượt.
+     */
+    private setItemInteractable(item: Component, interactable: boolean): void {
+        if (!this.gateInteractableItemsByTurn || !item?.isValid) return;
+
+        const gated = item as unknown as { SetInteractable?: (value: boolean) => void };
+        gated.SetInteractable?.(interactable);
+    }
+
+    /**
+     * Đặt lại trạng thái tương tác cho TOÀN BỘ danh sách theo currentItemIndex, thay vì chỉ đụng
+     * vào item vừa đổi lượt. Một lần chuyển lượt bị hụt - StartItems() gọi lại, item bị
+     * shouldSkipItem() nhảy qua, ItemCleanDone() bắn hai lần - sẽ tự được sửa ở lần gọi kế tiếp
+     * thay vì để một item kẹt khoá vĩnh viễn.
+     */
+    private applyTurnGate(): void {
+        if (!this.gateInteractableItemsByTurn || this.displayMode !== CleanItemDisplayMode.ShowAll) return;
+
+        for (let i = 0; i < this.items.length; i++) {
+            this.setItemInteractable(this.items[i], i === this.currentItemIndex);
+        }
+    }
+
+    /**
+     * Kết thúc lượt của item hiện tại và chuyển sang item kế tiếp.
+     *
+     * @param source Component gọi hàm này. Bắt buộc với item không phải CleanItem (xem bên dưới).
+     *               Event wiring trong scene truyền vào customEventData (string) nên bị coi là
+     *               không rõ nguồn.
+     */
+    public ItemCleanDone(source?: unknown): void {
         if (this.isTransitioning || this.currentItemIndex < 0 || this.hasCompletedSequence) return;
 
         const item = this.items[this.currentItemIndex];
@@ -100,7 +195,31 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             return;
         }
 
+        const cleanItem = item.getComponent('CleanItem') as CleanItem | null;
+        if (cleanItem) {
+            // Một CleanItem nhiều vết bẩn có thể nối từng DirtCleaner.onComplete vào đây;
+            // chỉ đẩy lượt khi đã sạch hết.
+            if (!cleanItem.IsAllCleaned) return;
+        } else if (!(source instanceof Component) || source.node !== item.node) {
+            // Item của lượt này không phải CleanItem (ví dụ TrashBin) nên không tự xác nhận được
+            // là đã xong; chỉ chính nó mới được kết thúc lượt của mình.
+            //
+            // Nếu không chặn: một CleanItem vừa xong ở lượt trước thường bắn ItemCleanDone nhiều
+            // lần liên tiếp (callItemCleanDoneOnAllCleaned + các DirtCleaner.onComplete nối thẳng
+            // trong scene). Tiếng gọi đầu đẩy lượt sang TrashBin, tiếng thứ hai đẩy tiếp qua luôn
+            // => rác vừa mở khoá đã bị khoá lại và onAllItemsCleaned bắn sớm.
+            return;
+        }
+
         this.disarmHandTut(item);
+
+        if (this.displayMode === CleanItemDisplayMode.ShowAll) {
+            // Item đã lau xong vẫn nằm nguyên tại chỗ; ShowNextItem() sẽ đổi lượt và
+            // applyTurnGate() tự khoá cái vừa xong, mở cái kế tiếp.
+            this.ShowNextItem();
+            return;
+        }
+
         this.isTransitioning = true;
         this.stopActiveTween();
         const zeroScale = this.getZeroScale(item);
@@ -120,12 +239,13 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         if (this.isTransitioning || this.hasCompletedSequence) return;
 
         let nextIndex = this.currentItemIndex + 1;
-        while (nextIndex < this.items.length && (!this.items[nextIndex] || !this.items[nextIndex].isValid)) {
+        while (nextIndex < this.items.length && this.shouldSkipItem(nextIndex)) {
             nextIndex++;
         }
 
         if (nextIndex >= this.items.length) {
             this.currentItemIndex = -1;
+            this.applyTurnGate();
             this.hasCompletedSequence = true;
             this.MoveScreenTargetOnComplete();
             Ply_SoundManager.Ins?.PlayFx(FxType.Aha);
@@ -135,21 +255,42 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
 
         this.currentItemIndex = nextIndex;
         const item = this.items[nextIndex];
-        const targetScale = this.getItemScale(item);
-        item.node.active = true;
-        item.node.setScale(this.getZeroScale(item));
-        Ply_SoundManager.Ins?.PlayFx(FxType.CleanItemAppear);
-        this.SpawnItemShowCloud(item);
 
-        this.stopActiveTween();
-        this.activeTween = tween(item.node)
-            .to(this.zoomDuration, { scale: targetScale }, { easing: 'backOut' })
-            .call(() => this.activeTween = null)
-            .start();
+        // ShowAll đã bung hết item kèm hiệu ứng appear ngay từ RevealAllItems(), nên chuyển lượt
+        // chỉ là mở khoá item mới - không zoom lại. Chỉ Sequential mới cần appear từng cái.
+        if (this.displayMode === CleanItemDisplayMode.ShowAll) {
+            this.applyTurnGate();
+        } else {
+            const targetScale = this.getItemScale(item);
+            item.node.active = true;
+            item.node.setScale(this.getZeroScale(item));
+            Ply_SoundManager.Ins?.PlayFx(FxType.CleanItemAppear);
+            this.SpawnItemShowCloud(item);
+
+            this.stopActiveTween();
+            this.activeTween = tween(item.node)
+                .to(this.zoomDuration, { scale: targetScale }, { easing: 'backOut' })
+                .call(() => this.activeTween = null)
+                .start();
+        }
 
         // Next frame: HandTutManager.start() may still run after ours on the
         // first item and would otherwise reset the started flag we set here.
         this.scheduleOnce(() => this.armHandTut(item), 0);
+    }
+
+    /**
+     * Item nào không được nhận lượt. Ở ShowAll mọi item đều hiện nên người chơi có thể lau
+     * item của lượt sau trước; item đã sạch phải bị bỏ qua, nếu không lượt sẽ đứng lại ở nó
+     * vì DirtCleaner.onComplete của nó đã bắn xong từ trước.
+     */
+    private shouldSkipItem(index: number): boolean {
+        const item = this.items[index];
+        if (!item || !item.isValid) return true;
+        if (this.displayMode !== CleanItemDisplayMode.ShowAll) return false;
+
+        const cleanItem = item.getComponent('CleanItem') as CleanItem | null;
+        return !!cleanItem?.IsAllCleaned;
     }
 
     /** Registers the shown item with HandTutManager and restarts its idle delay. */

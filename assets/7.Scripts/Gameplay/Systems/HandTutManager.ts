@@ -3,6 +3,9 @@ import { Item } from '../Items/Components/Item';
 import { ItemType } from '../Items/Components/ItemType';
 import { ItemStirring } from '../Items/Components/ItemStirring';
 import { Ply_Singleton } from '../Framework/Ply_Singleton';
+// Chỉ import type: ItemSnap -> InputManager -> HandTutManager là một vòng, import runtime
+// sẽ làm decorator @property chạy lúc ItemSnap còn undefined.
+import type { ItemSnap } from '../Items/Snapping/ItemSnap';
 
 const { ccclass, property } = _decorator;
 
@@ -43,6 +46,23 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     @property({ min: 0 }) public waitAtEndDuration = 0.2;
     @property public clickScaleMultiplier = 1.25;
 
+    // ==================== ITEMSNAP HINT ====================
+    // Gộp từ ItemSpawnManager: trước đây nó chạy một bộ hand tut riêng trên cùng node hand,
+    // hai bên phải né nhau bằng cặp cờ isShowingHint / isSpawnHandTutShowing và giành quyền
+    // bằng ResetHandTutDelay(). Giờ chỉ còn một node hand, một idle timer, một thứ tự ưu tiên:
+    // Item thường -> ItemSnap -> fallback click.
+
+    @property({ tooltip: 'Bật hand tut kéo cho các ItemSnap đang chờ vào holder (ItemSpawnManager đăng ký item vào đây)' })
+    public enableItemSnapHint = true;
+
+    @property({ min: -1, tooltip: 'Delay riêng khi lượt gợi ý kế tiếp là ItemSnap. -1 = dùng idleDelay chung' })
+    public itemSnapHintDelay = 7;
+
+    @property({ min: -1, step: 1, tooltip: 'Số ItemSnap (khác nhau) được gợi ý. -1 = không giới hạn, 0 = tắt' })
+    public maxItemSnapHintCount = -1;
+
+    // =======================================================
+
     @property({type:Item})
     public currentItemHandTut: Item | null = null;
 
@@ -65,10 +85,14 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     private currentHintToken = 0;
     private activeAuxTween: Tween<object> | null = null;
     private boundItems = new Set<Item>();
-    // The hand node is shared with ItemSpawnManager. Only touch it while this
-    // manager is the one showing a hint, so the two never cancel each other.
+    // Guards the hand node against being reset by a hide() that this manager did not cause.
     private isShowingHint = false;
     private idleDelayOverride = -1;
+    private snapItems: ItemSnap[] = [];
+    private boundSnapItems = new Set<ItemSnap>();
+    private hintedSnapItems = new Set<ItemSnap>();
+    private itemSnapHintCondition: (() => boolean) | null = null;
+    private currentSnapHandTut: ItemSnap | null = null;
     private fallbackClickNode: Node | null = null;
     private fallbackClickCondition: (() => boolean) | null = null;
     private currentFallbackNode: Node | null = null;
@@ -99,7 +123,18 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         // A phase can deactivate an item while its hint is already playing.
         // Hide it immediately so the hand never points to invisible content.
         if (this.currentItemHandTut
-            && (!this.currentItemHandTut.node.activeInHierarchy || this.currentItemHandTut.isDone)) {
+            && (!this.currentItemHandTut.node.activeInHierarchy
+                || this.currentItemHandTut.isDone
+                // Hint kéo mà đích biến mất giữa chừng (vết bẩn vừa lau xong) thì tắt ngay,
+                // đừng đợi hết một vòng tween mới nhận ra.
+                || (this.TypeHind === TypeHind.Drag && !this.hasValidDragTarget(this.currentItemHandTut)))) {
+            this.hideHandTut();
+            this.resetIdleTimer();
+            return;
+        }
+
+        // Same for an ItemSnap hint whose item was picked up, placed, or locked.
+        if (this.currentSnapHandTut && !this.canHintItemSnap(this.currentSnapHandTut)) {
             this.hideHandTut();
             this.resetIdleTimer();
             return;
@@ -198,6 +233,31 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     }
 
     /**
+     * ItemSpawnManager gọi cho mỗi ItemSnap vừa spawn / vừa hiện ra. Item tự rụng khỏi danh
+     * sách khi bị huỷ, nên không bắt buộc phải gọi RemoveItemSnap().
+     */
+    public AddItemSnap(item: ItemSnap): void {
+        if (!this.enableItemSnapHint || !item?.isValid || this.snapItems.includes(item)) return;
+        this.snapItems.push(item);
+        this.bindItemSnap(item);
+    }
+
+    public RemoveItemSnap(item: ItemSnap): void {
+        const index = this.snapItems.indexOf(item);
+        if (index >= 0) this.snapItems.splice(index, 1);
+        if (this.currentSnapHandTut === item) this.hideHandTut();
+    }
+
+    /**
+     * Điều kiện phụ để hint ItemSnap được phép chạy, kiểm lại mỗi frame giống
+     * SetFallbackClickTarget. ItemSpawnManager dùng để chặn lúc còn item đang bay từ hộp
+     * hoặc đã đạt giới hạn đặt item. Truyền null để bỏ điều kiện.
+     */
+    public SetItemSnapHintCondition(canShow: (() => boolean) | null): void {
+        this.itemSnapHintCondition = canShow;
+    }
+
+    /**
      * Replaces idleDelay/firstHandTutDelay/noDelayItemCount with a fixed delay
      * so gameplay managers can own their own hint timing. Negative = use the
      * configured delays again.
@@ -263,6 +323,17 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         const item = this.getFirstTutorialReadyItem();
         if (!item) {
             this.currentItemHandTut = null;
+
+            // Hết Item thường sẵn sàng thì tới lượt ItemSnap.
+            const snapItem = this.getFirstReadyItemSnap();
+            if (snapItem) {
+                this.hintedSnapItems.add(snapItem);
+                this.playItemSnapHint(snapItem);
+                this.currentSnapHandTut = snapItem;
+                this.TypeHind = TypeHind.Drag;
+                return;
+            }
+
             if (this.canShowFallbackClick()) {
                 this.playClickHint(this.fallbackClickNode!);
                 this.currentFallbackNode = this.fallbackClickNode;
@@ -276,7 +347,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Click;
         } else if (this.isDraggableReady(item) && this.hasValidDragTarget(item)) {
-            this.playMoveHint(item.node, item.itemMoveToTarget!.defaultTarget);
+            this.playMoveHint(item);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Drag;
         } else if (this.isStirringReady(item)) {
@@ -329,9 +400,11 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
 
     /** Validates the configured drag target, including optional type matching. */
     private hasValidDragTarget(item: Item): boolean {
-        const target = item.itemMoveToTarget?.defaultTarget;
+        // GetHandTutTarget() chứ không phải defaultTarget: CleanItem trả về vết bẩn chưa lau,
+        // và trả null khi đã sạch hết nên item đó tự rụng khỏi danh sách ứng viên.
+        const target = item.GetHandTutTarget();
         const draggable = item.itemDraggable;
-        if (!target || !target.isValid || !draggable) return false;
+        if (!target || !target.isValid || !target.activeInHierarchy || !draggable) return false;
         if (!item.requireMatchingTargetTypeForHandTut) return true;
 
         const targetItem = target.getComponent(Item);
@@ -340,6 +413,78 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
 
     private isStirringReady(item: Item): boolean {
         return !!item.itemStirring?.enabled && !item.itemStirring.IsDone;
+    }
+
+    private bindItemSnap(item: ItemSnap): void {
+        if (this.boundSnapItems.has(item)) return;
+        this.boundSnapItems.add(item);
+
+        item.onStartDrag.addListener(() => this.OnGameplayDragBegin());
+        item.onPlacedSuccess.addListener(() => this.RegisterCorrectAction());
+        item.onPlacedFail.addListener(() => this.ResetHandTutDelay());
+    }
+
+    /** ItemSnap đang chờ, nằm trên cùng (siblingIndex lớn nhất) và còn trong hạn mức gợi ý. */
+    private getFirstReadyItemSnap(): ItemSnap | null {
+        if (!this.enableItemSnapHint || this.snapItems.length === 0) return null;
+        if (this.itemSnapHintCondition && !this.itemSnapHintCondition()) return null;
+
+        let best: ItemSnap | null = null;
+        for (const item of this.snapItems) {
+            if (!this.canHintItemSnap(item)) continue;
+            if (!best || item.node.getSiblingIndex() > best.node.getSiblingIndex()) best = item;
+        }
+        return best;
+    }
+
+    private canHintItemSnap(item: ItemSnap): boolean {
+        // CanStartDrag đã gộp sẵn enabled + không bị khoá kéo + đang ở trạng thái Waiting.
+        if (!item?.isValid || !item.node?.activeInHierarchy) return false;
+        if (!item.CanStartDrag || !item.CanPlaced()) return false;
+        if (this.itemSnapHintCondition && !this.itemSnapHintCondition()) return false;
+
+        if (this.maxItemSnapHintCount < 0) return true;
+        if (this.hintedSnapItems.has(item)) return true;
+        return this.hintedSnapItems.size < this.maxItemSnapHintCount;
+    }
+
+    /**
+     * Kéo từ item tới holder đúng của nó. Khác playMoveHint ở chỗ toạ độ được đọc lại mỗi
+     * vòng lặp: item chờ vẫn đang nhấp nhô và holder có thể bị đổi/ẩn giữa chừng.
+     */
+    private playItemSnapHint(item: ItemSnap): void {
+        const token = this.prepareHand(item.node.worldPosition);
+        const endPosition = new Vec3();
+
+        const loop = () => {
+            if (!this.isHintCurrent(token)) return;
+            if (!this.canHintItemSnap(item)) {
+                this.hideHandTut();
+                return;
+            }
+
+            this.bringHandToFront();
+            this.handNode.setWorldPosition(item.node.worldPosition);
+            this.setHandAlpha(this.handDefaultAlpha);
+
+            const holder = item.correctHolderTransform;
+            endPosition.set(holder?.activeInHierarchy ? holder.worldPosition : item.node.worldPosition);
+
+            tween(this.handNode)
+                .to(this.moveDuration, { worldPosition: endPosition }, { easing: 'sineInOut' })
+                .call(() => this.setHandAlpha(0))
+                .delay(this.waitAtEndDuration)
+                .call(loop)
+                .start();
+        };
+
+        loop();
+    }
+
+    /** Hand phải nằm trên cùng, item vừa BringToFront có thể đã chen lên trước nó. */
+    private bringHandToFront(): void {
+        const parent = this.handNode?.parent;
+        if (parent) this.handNode.setSiblingIndex(parent.children.length - 1);
     }
 
     private canShowFallbackClick(): boolean {
@@ -362,14 +507,28 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         loop();
     }
 
-    private playMoveHint(start: Node, end: Node): void {
-        const token = this.prepareHand(start.worldPosition);
-        const startPosition = start.worldPosition.clone();
-        const endPosition = end.worldPosition.clone();
+    /**
+     * Kéo từ item tới đích của nó. Cả hai đầu đều được đọc lại mỗi vòng lặp: item có thể đã bị
+     * người chơi kéo đi chỗ khác, còn đích thì đổi theo trạng thái (CleanItem nhảy sang vết bẩn
+     * kế tiếp ngay khi lau xong một vết).
+     */
+    private playMoveHint(item: Item): void {
+        const token = this.prepareHand(item.node.worldPosition);
+        const endPosition = new Vec3();
+
         const loop = () => {
             if (!this.isHintCurrent(token)) return;
-            this.handNode.setWorldPosition(startPosition);
+
+            const target = item.GetHandTutTarget();
+            if (!target?.isValid || !target.activeInHierarchy) {
+                this.hideHandTut();
+                return;
+            }
+
+            this.handNode.setWorldPosition(item.node.worldPosition);
             this.setHandAlpha(this.handDefaultAlpha);
+            endPosition.set(target.worldPosition);
+
             tween(this.handNode)
                 .to(this.moveDuration, { worldPosition: endPosition }, { easing: 'sineInOut' })
                 .call(() => this.setHandAlpha(0))
@@ -419,6 +578,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     private hideHandTut(): void {
         this.currentHintToken++;
         this.currentItemHandTut = null;
+        this.currentSnapHandTut = null;
         this.currentFallbackNode = null;
         this.TypeHind = TypeHind.None;
         this.activeAuxTween?.stop();
@@ -443,6 +603,16 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         if (this.forceNoDelay) return this.shortIdleDelay;
         if (this.idleDelayOverride >= 0) return this.idleDelayOverride;
         if (this.shownCount < this.noDelayItemCount) return this.shortIdleDelay;
+
+        // Lượt kế tiếp sẽ là hint ItemSnap (không còn Item thường nào sẵn sàng) => dùng delay
+        // riêng của nó, đúng bằng handTutDelay mà ItemSpawnManager giữ trước đây.
+        if (this.itemSnapHintDelay >= 0
+            && this.snapItems.length > 0
+            && !this.getFirstTutorialReadyItem()
+            && !!this.getFirstReadyItemSnap()) {
+            return this.itemSnapHintDelay;
+        }
+
         return this.hasShownFirstHint ? this.idleDelay : this.firstHandTutDelay;
     }
 
@@ -457,6 +627,10 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     private removeCompletedItems(): void {
         for (let i = this.items.length - 1; i >= 0; i--) {
             if (!this.items[i] || this.items[i].isDone) this.items.splice(i, 1);
+        }
+
+        for (let i = this.snapItems.length - 1; i >= 0; i--) {
+            if (!this.snapItems[i]?.isValid) this.snapItems.splice(i, 1);
         }
     }
 }
