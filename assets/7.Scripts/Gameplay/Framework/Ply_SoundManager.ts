@@ -123,12 +123,26 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
         if (!fxAudio || !fxAudio.audioClip) return;
 
         const source = this.GetOrCreateFxSource(type);
-        source.clip = fxAudio.audioClip;
+        // Chỉ gán clip khi khác, để source đang pause giữ nguyên vị trí phát
+        if (source.clip !== fxAudio.audioClip) {
+            source.clip = fxAudio.audioClip;
+        }
         source.volume = fxAudio.volume;
         source.loop = true;
 
+        // play() trên source đang pause sẽ phát tiếp từ vị trí cũ
         if (!source.playing) {
             source.play();
+        }
+    }
+
+    /**
+     * Pause looping sound effect, PlayFxLoop sau đó sẽ phát tiếp từ vị trí đã dừng
+     */
+    public PauseFxLoop(fxType: FxType | number) {
+        const source = this.sourcesMap.get(fxType as FxType);
+        if (source && source.playing) {
+            source.pause();
         }
     }
 

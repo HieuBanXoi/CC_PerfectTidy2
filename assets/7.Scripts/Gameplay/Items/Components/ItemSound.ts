@@ -10,5 +10,7 @@ export class ItemSound extends Ply_EventHandlerComponent {
     public PlaySoundFX(fxType: FxType) {
         Ply_SoundManager.Ins.PlayFx(fxType);
     }
-
+    public PlayAhaSound() {
+        Ply_SoundManager.Ins.PlayFx(FxType.Aha);
+    }
 }

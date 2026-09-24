@@ -2,7 +2,6 @@ import { _decorator, Component, Node, Vec3, UITransform, EventTarget, clamp01 } 
 import { DirtMaskRenderer } from './DirtMaskRenderer';
 import { Ply_Event } from '../Framework/Ply_Event';
 import { Ply_EventHandlerComponent } from '../Framework/Ply_EventHandlerComponent';
-
 const { ccclass, property } = _decorator;
 
 export const WebEvent = {

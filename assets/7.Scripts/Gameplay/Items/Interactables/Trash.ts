@@ -4,6 +4,7 @@ import { ItemMoveToTarget } from '../Components/ItemMoveToTarget';
 import { TrashBin } from './TrashBin';
 import { GameManager } from '../../Systems/GameManager';
 import { FxType, Ply_SoundManager } from '../../Framework/Ply_SoundManager';
+import { Ply_Event } from '../../Framework/Ply_Event';
 
 const { ccclass, property } = _decorator;
 
@@ -25,6 +26,12 @@ export class Trash extends Item {
 
     @property({ type: Enum(FxType), tooltip: 'Âm thanh phát khi thả trúng thùng rác' })
     public dropSuccessFxType: FxType = FxType.Swipe;
+
+    @property({ tooltip: 'Phát sound Aha khi rác đã bay vào thùng xong' })
+    public playAhaOnArrive = true;
+
+    @property({ type: Ply_Event, tooltip: 'Gọi khi rác bay vào thùng xong (ItemMoveToTarget complete)' })
+    public onArriveAtBin: Ply_Event = new Ply_Event();
 
     @property({ tooltip: 'Bob up and down (like ItemSnap) after a missed drop. The trash stays where it was dropped.' })
     public enableIdleBobbing = true;
@@ -130,6 +137,10 @@ export class Trash extends Item {
 
         // Rác đã vào thùng: tính 1 nước đi.
         GameManager.Ins?.MoveOne();
+        if (this.playAhaOnArrive) {
+            Ply_SoundManager.Ins?.PlayFx(FxType.Aha);
+        }
+        this.onArriveAtBin?.invoke();
         this.ItemDone();
         this.node.active = false;
         this.trashBin?.AddTrash(this);

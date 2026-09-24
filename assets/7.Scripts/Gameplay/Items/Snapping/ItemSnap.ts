@@ -8,6 +8,7 @@ import { PoolType } from '../../../Core/Pooling/PoolMember';
 import { ItemHolder } from './ItemHolder';
 import { BlinkEffect } from '../../Effects/BlinkEffect';
 import { MergeEffect } from '../../Effects/MergeEffect';
+import { HeartEffect } from '../../Effects/HeartEffect';
 
 const { ccclass, property } = _decorator;
 
@@ -79,6 +80,29 @@ export class ItemSnap extends Component {
 
     @property({ type: Enum(PoolType) })
     public vfxPoolType: PoolType = PoolType.BlinkFX;
+
+    @property({ tooltip: 'Spawn thêm hiệu ứng trái tim (HeartFX) khi item snap vào holder thành công' })
+    public spawnHeartOnPlaced: boolean = false;
+
+    @property({
+        min: 0,
+        visible: function (this: ItemSnap) { return this.spawnHeartOnPlaced; },
+        tooltip: 'Hệ số scale của hiệu ứng trái tim'
+    })
+    public heartEffectScale: number = 1.0;
+
+    @property({
+        min: 0,
+        visible: function (this: ItemSnap) { return this.spawnHeartOnPlaced; },
+        tooltip: 'Chờ bao nhiêu giây sau khi snap xong mới spawn trái tim (0 = spawn ngay)'
+    })
+    public heartSpawnDelay: number = 0;
+
+    @property({
+        visible: function (this: ItemSnap) { return this.spawnHeartOnPlaced; },
+        tooltip: 'Gắn trái tim làm con của item (bật = bay theo item, tắt = đứng yên tại chỗ snap)'
+    })
+    public attachHeartToItem: boolean = false;
 
     @property({ min: 1.0, tooltip: 'Scale multiplier applied to baseScale when dragged' })
     public dragScaleMultiplier: number = 1.2;
@@ -536,6 +560,7 @@ export class ItemSnap extends Component {
                 }
 
                 this.SpawnVFX();
+                this.SpawnHeartOnPlaced();
                 this.EnableAnimatorWhenPlaced();
 
                 // Punch item một phát khi snap đúng (bật/tắt trong ItemSpawnManager).
@@ -691,6 +716,35 @@ export class ItemSnap extends Component {
         if (effect && typeof effect.DeSpawnByTime === 'function') {
             effect.DeSpawnByTime();
         }
+    }
+
+    /** Trái tim ăn mừng khi item về đúng holder. Bật/tắt bằng spawnHeartOnPlaced trên Inspector. */
+    public SpawnHeartOnPlaced(): void {
+        if (!this.spawnHeartOnPlaced) return;
+
+        if (this.heartSpawnDelay > 0) {
+            // Delay chạy trên một object rời: ngay sau khi snap xong component này bị disable
+            // nên scheduleOnce của Component sẽ không bao giờ bắn.
+            tween({}).delay(this.heartSpawnDelay).call(() => this.DoSpawnHeart()).start();
+            return;
+        }
+        this.DoSpawnHeart();
+    }
+
+    private DoSpawnHeart(): void {
+        if (!this.node || !this.node.isValid) return;
+
+        const spawnPos = this.node.worldPosition.clone();
+        const heartEffect = World.instance?.poolManager?.spawnType<HeartEffect>(PoolType.HeartFX, spawnPos);
+        if (!heartEffect) return;
+
+        if (this.attachHeartToItem) {
+            heartEffect.node.setParent(this.node, true);
+            heartEffect.node.setPosition(0, 0, 0);
+            heartEffect.node.setWorldRotationFromEuler(0, 0, 0);
+        }
+
+        heartEffect.PlaySpawnWithScale(this.heartEffectScale);
     }
 
     public PlaySoundOnPlace(): void {
