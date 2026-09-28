@@ -39,6 +39,7 @@ exports.getPlayableEnginePath = getPlayableEnginePath;
 exports.generateChannelZipJs = generateChannelZipJs;
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs-extra"));
+const child_process_1 = require("child_process");
 // @ts-ignore
 const AdmZip = require("adm-zip");
 const channels_1 = require("./channels");
@@ -48,14 +49,82 @@ exports.FILE_EXTENSIONS = {
     IMAGE: ['.png', '.jpg', '.jpeg'],
     AUDIO: ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'],
 };
-let sharpLib = null;
-try {
-    // sharp là native module: có thể build lệch ABI với Electron của Cocos Creator Editor.
-    // Nếu load lỗi, tự động fallback dùng file ảnh gốc (không nén) thay vì làm sập cả build.
-    sharpLib = require('sharp');
+/**
+ * Console riêng của Cocos Creator (asset-db/builder worker) không hiện được object Error truyền
+ * làm tham số phụ cho console.warn/error (chỉ hiện đúng chuỗi message đầu tiên) -> luôn nhét
+ * message + stack thẳng vào 1 chuỗi duy nhất để chắc chắn thấy được lỗi thật.
+ */
+function errorDetail(err) {
+    if (err instanceof Error) {
+        return `${err.message}\n${err.stack || ''}`;
+    }
+    try {
+        return JSON.stringify(err);
+    }
+    catch {
+        return String(err);
+    }
 }
-catch (err) {
-    console.warn('[playable-ads-builder] Không load được "sharp", ảnh sẽ giữ nguyên (không nén webp).', err);
+async function compressImagesBatch(images, compression, tempDir) {
+    const compressedById = new Map();
+    if (images.length === 0) {
+        return compressedById;
+    }
+    const jobDir = path.join(tempDir, `_imgCompress_${Date.now()}_${Math.round(Math.random() * 1e6)}`);
+    await fs.ensureDir(jobDir);
+    const jobFile = path.join(jobDir, 'job.json');
+    const resultFile = path.join(jobDir, 'result.json');
+    const workerScript = path.join(__dirname, 'compress-worker.js');
+    try {
+        await fs.writeJson(jobFile, {
+            compression,
+            outDir: jobDir,
+            images: images.map(img => ({ id: img.id, input: img.full })),
+        });
+        await new Promise((resolve, reject) => {
+            const child = (0, child_process_1.spawn)(process.execPath, [workerScript, jobFile, resultFile], {
+                env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+                windowsHide: true,
+            });
+            let stderr = '';
+            child.stderr?.on('data', chunk => { stderr += chunk.toString(); });
+            child.on('error', reject);
+            child.on('exit', code => {
+                if (code === 0) {
+                    resolve();
+                }
+                else {
+                    reject(new Error(`Tiến trình con nén ảnh thoát với mã lỗi ${code}.${stderr ? `\n${stderr}` : ''}`));
+                }
+            });
+        });
+        const results = await fs.readJson(resultFile);
+        for (const img of images) {
+            const entry = results[img.id];
+            if (!entry) {
+                continue;
+            }
+            if (entry.error) {
+                console.warn(`[playable-ads-builder] Nén ảnh thất bại, dùng ảnh gốc: ${img.full}. Chi tiết lỗi: ${entry.error}`);
+                continue;
+            }
+            if (entry.compressed) {
+                const outFile = path.join(jobDir, `${img.id}.webp`);
+                compressedById.set(img.id, await fs.readFile(outFile));
+                console.log(`[playable-ads-builder] Nén ảnh ${path.basename(img.full)}: ${entry.originalSize} -> ${entry.compressedSize} byte`);
+            }
+            else {
+                console.log(`[playable-ads-builder] Nén ảnh ${path.basename(img.full)}: không nhỏ hơn bản gốc, giữ nguyên.`);
+            }
+        }
+    }
+    catch (err) {
+        console.warn(`[playable-ads-builder] Nén ảnh (tiến trình con) thất bại, toàn bộ ảnh sẽ giữ nguyên không nén. Chi tiết lỗi: ${errorDetail(err)}`);
+    }
+    finally {
+        await fs.remove(jobDir).catch(() => undefined);
+    }
+    return compressedById;
 }
 let ffmpegLib = null;
 try {
@@ -66,22 +135,7 @@ try {
     }
 }
 catch (err) {
-    console.warn('[playable-ads-builder] Không load được "fluent-ffmpeg"/"ffmpeg-static", audio sẽ giữ nguyên (không nén mp3).', err);
-}
-async function compressImage(filePath, compression) {
-    const raw = await fs.readFile(filePath);
-    if (!sharpLib || compression.type === channels_1.CompressionType.None) {
-        return raw;
-    }
-    try {
-        const options = compression.type === channels_1.CompressionType.Lossless ? { lossless: true } : { quality: compression.quality };
-        const compressed = await sharpLib(filePath).webp(options).toBuffer();
-        return compressed.length < raw.length ? compressed : raw;
-    }
-    catch (err) {
-        console.warn(`[playable-ads-builder] Nén ảnh thất bại, dùng ảnh gốc: ${filePath}`, err);
-        return raw;
-    }
+    console.warn(`[playable-ads-builder] Không load được "fluent-ffmpeg"/"ffmpeg-static", audio sẽ giữ nguyên (không nén mp3). Chi tiết lỗi: ${errorDetail(err)}`);
 }
 async function compressAudio(filePath, tempDir, bitrate) {
     if (!ffmpegLib) {
@@ -96,17 +150,22 @@ async function compressAudio(filePath, tempDir, bitrate) {
         return { relativeExt: '.mp3', data: await fs.readFile(outFile) };
     }
     catch (err) {
-        console.warn(`[playable-ads-builder] Nén audio thất bại, dùng file gốc: ${filePath}`, err);
+        console.warn(`[playable-ads-builder] Nén audio thất bại, dùng file gốc: ${filePath}. Chi tiết lỗi: ${errorDetail(err)}`);
         return { relativeExt: path.extname(filePath), data: await fs.readFile(filePath) };
     }
 }
-/** Duyệt đệ quy thư mục web-mobile output, nén ảnh/audio theo cấu hình, trả về danh sách file sẽ đóng vào zip */
-async function walk(dir, root, compression, audio, tempDir) {
+function isPendingImage(entry) {
+    return entry.pendingImageId !== undefined;
+}
+/** Duyệt đệ quy thư mục web-mobile output; ảnh chỉ được ĐĂNG KÝ vào `pendingImages` (nén hàng loạt
+ *  ở collectWebMobileFiles bằng 1 tiến trình con duy nhất), audio nén ngay tại đây (ffmpeg tự spawn
+ *  tiến trình riêng cho mỗi file nên không bị giới hạn renderer process). */
+async function walk(dir, root, audio, tempDir, pendingImages) {
     const entries = await fs.readdir(dir);
     const results = await Promise.all(entries.map(async (entry) => {
         const full = path.join(dir, entry);
         if ((await fs.stat(full)).isDirectory()) {
-            return walk(full, root, compression, audio, tempDir);
+            return walk(full, root, audio, tempDir, pendingImages);
         }
         const ext = path.extname(full).toLowerCase();
         const relPath = path.relative(root, full).replace(/\\/g, '/');
@@ -114,7 +173,9 @@ async function walk(dir, root, compression, audio, tempDir) {
             return null;
         }
         if (exports.FILE_EXTENSIONS.IMAGE.includes(ext)) {
-            return { path: relPath, data: await compressImage(full, compression) };
+            const id = pendingImages.length;
+            pendingImages.push({ id, full });
+            return { path: relPath, pendingImageId: id };
         }
         if (exports.FILE_EXTENSIONS.AUDIO.includes(ext) && audio.enabled) {
             const { relativeExt, data } = await compressAudio(full, path.join(tempDir, '_audioCompressed'), audio.bitrate);
@@ -126,7 +187,20 @@ async function walk(dir, root, compression, audio, tempDir) {
     return results.flat().filter((f) => f !== null);
 }
 async function collectWebMobileFiles(webMobileDir, compression, audio, tempDir) {
-    return walk(webMobileDir, webMobileDir, compression, audio, tempDir);
+    const pendingImages = [];
+    const entries = await walk(webMobileDir, webMobileDir, audio, tempDir, pendingImages);
+    const compressedById = compression.type === channels_1.CompressionType.None
+        ? new Map()
+        : await compressImagesBatch(pendingImages, compression, tempDir);
+    const files = await Promise.all(entries.map(async (entry) => {
+        if (!isPendingImage(entry)) {
+            return entry;
+        }
+        const pending = pendingImages[entry.pendingImageId];
+        const compressed = compressedById.get(entry.pendingImageId);
+        return { path: entry.path, data: compressed || await fs.readFile(pending.full) };
+    }));
+    return files;
 }
 // --- base122: mã hoá gọn cho các kênh nhúng zip.js trực tiếp vào <script> inline (không zip riêng) ---
 const BASE122_ILLEGAL_BYTES = [0, 10, 13, 34, 38, 92, 60];
