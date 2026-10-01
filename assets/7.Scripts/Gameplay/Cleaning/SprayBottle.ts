@@ -99,7 +99,10 @@ export class SprayBottle extends Item {
     @property({ min: 0, tooltip: 'Bọt spawn lệch ngẫu nhiên quanh sprayPoint trong bán kính này (world).' })
     public spawnJitter = 30;
 
-    @property({ tooltip: 'Loop sound khi đang xịt trúng.' })
+    @property({ tooltip: 'Bật tia xịt (particle + sound) suốt lúc kéo khi tới lượt. Tắt: chỉ bật khi sprayPoint trúng vùng target.' })
+    public sprayWhileDragging = true;
+
+    @property({ tooltip: 'Loop sound khi đang xịt.' })
     public playSpraySound = true;
 
     @property({ type: Enum(FxType) })
@@ -183,6 +186,7 @@ export class SprayBottle extends Item {
         this._isDragging = true;
         this._sprayedInDrag = false;
         this._spawnCooldown = 0;
+        if (this.sprayWhileDragging) this.startSpray();
     }
 
     private onDragEnd(): void {
@@ -218,7 +222,7 @@ export class SprayBottle extends Item {
         (this.sprayPoint ?? this.node).getWorldPosition(this._point);
         const hit = this._states.find(s => this.isInsideShape(s, this._point));
         if (!hit) {
-            this.stopSpray();
+            if (!this.sprayWhileDragging) this.stopSpray();
             return;
         }
 

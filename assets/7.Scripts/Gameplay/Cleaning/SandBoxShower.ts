@@ -9,9 +9,18 @@ import { DirtCleaner } from './DirtCleaner';
 
 const { ccclass, property } = _decorator;
 
+/** Các field của hạt trong simulator nội bộ của ParticleSystem2D. */
+interface SimParticle {
+    timeToLive: number;
+    size: number;
+    deltaSize: number;
+    color: { a: number };
+    deltaColor: { a: number };
+}
+
 /**
  * Vòi sen rửa nhiều sandbox cùng lúc.
- * - Kéo vòi: brushPoint trúng vùng soap -> bật particle nước.
+ * - Kéo vòi (đúng lượt): bật particle nước suốt lúc kéo (waterWhileDragging).
  * - Quét tới đâu: DirtCleaner (CleanMat) làm mờ soap_sandbox tới đó, tắt SoapPTC và làm mờ bọt (FoamEffect) quanh đó.
  * - Tất cả DirtCleaner hoàn thành -> dọn nốt particle/bọt còn lại -> ItemCleanManager.ItemCleanDone.
  */
@@ -39,9 +48,15 @@ export class SandBoxShower extends Item {
     public foamClearRadius = 90;
 
     @property({ min: 0.01, tooltip: 'Thời gian bọt mờ đi khi bị rửa (giây).' })
-    public foamFadeDuration = 0.4;
+    public foamFadeDuration = 0.25;
 
-    @property({ tooltip: 'Loop sound khi đang xịt nước trúng.' })
+    @property({ min: 0.01, tooltip: 'Thời gian các hạt SoapPTC đang có co nhỏ và mờ hết khi bị rửa (giây).' })
+    public soapPopDuration = 0.3;
+
+    @property({ tooltip: 'Bật nước (particle + sound) suốt lúc kéo khi tới lượt shower. Tắt: chỉ bật khi đang trúng vùng rửa.' })
+    public waterWhileDragging = true;
+
+    @property({ tooltip: 'Loop sound khi đang xịt nước.' })
     public playWaterSound = true;
 
     @property({ type: Enum(FxType) })
@@ -110,6 +125,7 @@ export class SandBoxShower extends Item {
         this._isDragging = true;
         this._washedInDrag = false;
         (this.brushPoint ?? this.node).getWorldPosition(this._lastPoint);
+        if (this.waterWhileDragging) this.startWater();
     }
 
     private onDragEnd(): void {
@@ -148,7 +164,7 @@ export class SandBoxShower extends Item {
             || this.foamParents.some(p => this.isInsideArea(this._point, p));
 
         if (!isOverTarget) {
-            this.stopWater();
+            if (!this.waterWhileDragging) this.stopWater();
             this._lastPoint.set(this._point);
             return;
         }
@@ -185,7 +201,7 @@ export class SandBoxShower extends Item {
             for (const particle of root.getComponentsInChildren(ParticleSystem2D)) {
                 if (this._stoppedParticles.has(particle)) continue;
                 if (center && this.distanceSq(center, particle.node.worldPosition) > radiusSq) continue;
-                particle.stopSystem();
+                this.popSoapParticle(particle);
                 this._stoppedParticles.add(particle);
             }
         }
@@ -221,6 +237,22 @@ export class SandBoxShower extends Item {
         if (this.playWaterSound && Ply_SoundManager.Ins) {
             Ply_SoundManager.Ins.PlayFxLoop(this.waterFxType);
             this._isPlayingSound = true;
+        }
+    }
+
+    /**
+     * Dừng phát bọt và cho các hạt đang sống co nhỏ + mờ về 0 trong soapPopDuration,
+     * thay vì để chúng sống hết life (vài giây) của particle.
+     */
+    private popSoapParticle(particle: ParticleSystem2D): void {
+        particle.stopSystem();
+        const duration = Math.max(0.01, this.soapPopDuration);
+        const simulator = (particle as unknown as { _simulator?: { particles?: SimParticle[] } })._simulator;
+        for (const p of simulator?.particles ?? []) {
+            if (p.timeToLive <= duration) continue;
+            p.timeToLive = duration;
+            p.deltaSize = -p.size / duration;
+            p.deltaColor.a = -p.color.a / duration;
         }
     }
 

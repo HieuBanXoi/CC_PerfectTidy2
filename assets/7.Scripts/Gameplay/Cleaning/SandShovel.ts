@@ -70,7 +70,7 @@ export class SandShovel extends Item {
     public playScoopSound = true;
 
     @property({ type: Enum(FxType) })
-    public scoopFxType: FxType = FxType.Clean2;
+    public scoopFxType: FxType = FxType.Shovel;
 
     @property({ type: ItemCleanManager, tooltip: 'Để trống sẽ dùng ItemCleanManager.Ins.' })
     public itemCleanManager: ItemCleanManager | null = null;

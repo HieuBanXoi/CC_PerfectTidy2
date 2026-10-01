@@ -1,4 +1,4 @@
-import { _decorator, Node, UITransform, Vec3, Enum } from 'cc';
+import { _decorator, Node, UITransform, Vec2, Vec3, Enum } from 'cc';
 import { PoolType } from '../../Core/Pooling/PoolMember';
 import { World } from '../../Core/Managers/World';
 import { Ply_Event } from '../Framework/Ply_Event';
@@ -97,13 +97,13 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             const draggable = item.itemDraggable;
             if (!draggable?.IsDragging) continue;
 
-            const isOverTarget = this.isItemOverTarget(item.node);
-            if (isOverTarget && !state.wasOverTarget && !state.startedAsCurrent
+            const overTarget = this.getItemOverTarget(item.node);
+            if (overTarget && !state.wasOverTarget && !state.startedAsCurrent
                 && !state.breakHeartSpawned) {
                 state.breakHeartSpawned = true;
-                this.spawnBreakHeartAtItem(item);
+                this.spawnBreakHeartAtItem(item, overTarget);
             }
-            state.wasOverTarget = isOverTarget;
+            state.wasOverTarget = !!overTarget;
         }
     }
 
@@ -297,9 +297,12 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         if (!dragState || dragState.startedAsCurrent) return;
 
         // Cover a release that happens before the next manager update frame.
-        if (!dragState.breakHeartSpawned && this.isItemOverTarget(item.node)) {
-            dragState.breakHeartSpawned = true;
-            this.spawnBreakHeartAtItem(item);
+        if (!dragState.breakHeartSpawned) {
+            const overTarget = this.getItemOverTarget(item.node);
+            if (overTarget) {
+                dragState.breakHeartSpawned = true;
+                this.spawnBreakHeartAtItem(item, overTarget);
+            }
         }
         if (!dragState.breakHeartSpawned) return;
 
@@ -307,22 +310,32 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         draggable.ReturnToStartWithoutHeart();
     }
 
-    private isItemOverTarget(itemNode: Node): boolean {
+    /**
+     * Đối tượng được dọn mà item đang nằm trên: targetItem (theo UITransform),
+     * hoặc một heartTarget (theo bounding box gồm cả node con, ví dụ cả phần lòng sandbox).
+     */
+    private getItemOverTarget(itemNode: Node): Node | null {
+        const point = itemNode.worldPosition;
         const target = this.targetItem;
-        if (!target?.isValid || !target.activeInHierarchy) return false;
-
-        const transform = target.getComponent(UITransform);
-        if (!transform) {
-            return Vec3.distance(itemNode.worldPosition, target.worldPosition) <= 1;
+        if (target?.isValid && target.activeInHierarchy) {
+            const transform = target.getComponent(UITransform);
+            if (transform ? this.isPointInsideNode(point, target)
+                : Vec3.distance(point, target.worldPosition) <= 1) {
+                return target;
+            }
         }
 
-        const localPosition = transform.convertToNodeSpaceAR(itemNode.worldPosition);
-        const left = -transform.anchorX * transform.width;
-        const right = left + transform.width;
-        const bottom = -transform.anchorY * transform.height;
-        const top = bottom + transform.height;
-        return localPosition.x >= left && localPosition.x <= right
-            && localPosition.y >= bottom && localPosition.y <= top;
+        for (const heartTarget of this.heartTargets) {
+            if (!heartTarget?.isValid || !heartTarget.activeInHierarchy) continue;
+            const bounds = heartTarget.getComponent(UITransform)?.getBoundingBoxToWorld();
+            if (bounds?.contains(new Vec2(point.x, point.y))) return heartTarget;
+        }
+        return null;
+    }
+
+    /** Ép heart của bước hiện tại spawn ở node này (bỏ qua vị trí tool đã báo). */
+    public SetHeartTarget(target: Node | null): void {
+        if (target?.isValid) this.lastHeartTarget = target;
     }
 
     /**
@@ -378,11 +391,13 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         }
     }
 
-    private spawnBreakHeartAtItem(item: Item): void {
-        // Wrong-turn feedback is shown on the cleaned object, so prefer the
-        // target item's configured spawn point. Fall back to the dragged item
-        // only when no target spawn point is configured.
-        const spawnNode = this.getTargetSpawnNode()
+    private spawnBreakHeartAtItem(item: Item, overTarget: Node | null = null): void {
+        // Wrong-turn feedback is shown on the cleaned object: the sandbox the
+        // item was dragged into (its HeartPos), otherwise the target item's
+        // spawn point, otherwise the dragged item.
+        const isHeartTarget = !!overTarget && this.heartTargets.includes(overTarget);
+        const spawnNode = (isHeartTarget ? (overTarget!.getChildByName('HeartPos') ?? overTarget) : null)
+            ?? this.getTargetSpawnNode()
             ?? (item.spawnHeartPos?.isValid ? item.spawnHeartPos : null);
         if (!spawnNode) return;
 
@@ -396,7 +411,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             effect.node.setParent(spawnNode);
         }
         effect.node.setPosition(0, 0, 0);
-        effect.PlaySpawn();
+        effect.PlaySpawnWithScale(isHeartTarget ? this.heartTargetScale : 1);
     }
 
     private getTargetSpawnNode(): Node | null {

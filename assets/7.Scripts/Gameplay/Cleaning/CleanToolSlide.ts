@@ -48,6 +48,12 @@ export class CleanToolSlide extends Component {
     @property({ tooltip: 'Độ dịch (local position) áp dụng cho shiftNodes.' })
     public shiftOffset: Vec3 = new Vec3();
 
+    @property({ tooltip: 'Độ cao cung nhảy khi dịch shiftNodes (local). 0 = trượt thẳng.' })
+    public shiftJumpHeight = 0;
+
+    @property({ min: 0, max: 0.5, step: 0.01, tooltip: 'Độ nhún (squash & stretch) khi nhảy. 0 = không nhún.' })
+    public shiftSquash = 0.08;
+
     @property({ min: 0.01, tooltip: 'Thời gian dịch shiftNodes (giây).' })
     public shiftDuration = 0.5;
 
@@ -220,11 +226,56 @@ export class CleanToolSlide extends Component {
         if (this.shiftOffset.equals(Vec3.ZERO)) return;
         for (const node of this.shiftNodes) {
             if (!node?.isValid) continue;
-            tween(node)
-                .delay(this.inDelay)
-                .by(this.shiftDuration, { position: this.shiftOffset.clone() }, { easing: 'sineInOut' })
+            if (this.shiftJumpHeight === 0) {
+                tween(node)
+                    .delay(this.inDelay)
+                    .by(this.shiftDuration, { position: this.shiftOffset.clone() }, { easing: 'sineInOut' })
+                    .start();
+                continue;
+            }
+
+            // Nhảy theo cung: dịch shiftOffset, cộng thêm độ cao parabol ở giữa đường.
+            const offset = this.shiftOffset.clone();
+            const height = this.shiftJumpHeight;
+            const squash = Math.max(0, this.shiftSquash);
+            const anticipation = squash > 0 ? 0.1 : 0;
+            this.playJumpSquash(node, squash, anticipation);
+
+            const state = { t: 0 };
+            let start: Vec3 | null = null;
+            tween(state)
+                .delay(this.inDelay + anticipation)
+                .call(() => { start = node.position.clone(); })
+                .to(this.shiftDuration, { t: 1 }, {
+                    easing: 'sineInOut',
+                    onUpdate: () => {
+                        if (!start || !node.isValid) return;
+                        const t = state.t;
+                        node.setPosition(
+                            start.x + offset.x * t,
+                            start.y + offset.y * t + height * 4 * t * (1 - t),
+                            start.z + offset.z * t,
+                        );
+                    },
+                })
                 .start();
         }
+    }
+
+    /** Nhún: bẹp lấy đà -> vươn khi bay -> bẹp khi chạm đất -> nảy về scale gốc. */
+    private playJumpSquash(node: Node, amount: number, anticipation: number): void {
+        if (amount <= 0) return;
+        const base = node.scale.clone();
+        const scaleOf = (sx: number, sy: number) => new Vec3(base.x * sx, base.y * sy, base.z);
+        const half = this.shiftDuration * 0.5;
+        tween(node)
+            .delay(this.inDelay)
+            .to(anticipation, { scale: scaleOf(1 + amount, 1 - amount) }, { easing: 'quadOut' })
+            .to(half, { scale: scaleOf(1 - amount * 0.5, 1 + amount * 0.5) }, { easing: 'sineOut' })
+            .to(half, { scale: base }, { easing: 'sineIn' })
+            .to(0.08, { scale: scaleOf(1 + amount * 0.8, 1 - amount * 0.8) }, { easing: 'quadOut' })
+            .to(0.2, { scale: base }, { easing: 'backOut' })
+            .start();
     }
 
     private getLinkedState(node: Node): LinkedNodeState {

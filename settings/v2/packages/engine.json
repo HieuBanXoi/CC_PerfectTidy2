@@ -107,7 +107,7 @@
             "_value": false
           },
           "profiler": {
-            "_value": false
+            "_value": true
           },
           "occlusion-query": {
             "_value": false
@@ -203,13 +203,13 @@
           "audio",
           "base",
           "custom-pipeline",
-          "custom-pipeline-post-process",
           "gfx-webgl",
           "graphics",
           "marionette",
           "mask",
           "particle-2d",
           "procedural-animation",
+          "profiler",
           "spine-4.2",
           "tween",
           "ui"

@@ -12,6 +12,7 @@ class SoapTargetState {
     public hitCount = 0;
     public isActivated = false;
     public wasInsideInLastFrame = false;
+    public scrubTime = 0;
 
     constructor(public readonly node: Node) { }
 }
@@ -33,6 +34,12 @@ export class SoapAdd extends Item {
 
     @property({ min: 1, step: 1, tooltip: 'Số lần brush đi vào target để kích hoạt particle.' })
     public hitsToActivate = 1;
+
+    @property({ min: 0, tooltip: 'Thời gian (giây) phải chà qua lại trong bán kính của 1 target mới kích hoạt. > 0 thì dùng chế độ này thay cho hitsToActivate.' })
+    public scrubTimeToActivate = 0;
+
+    @property({ min: 0, tooltip: 'Brush phải di chuyển tối thiểu (world/frame) thì mới tính là đang chà.' })
+    public scrubMinMove = 1;
 
     @property({ tooltip: 'Play a sound when a soap target is activated.' })
     public playCutSound: boolean = true;
@@ -76,6 +83,8 @@ export class SoapAdd extends Item {
     private isTrailPlaying = false;
     private isDragSoundPlaying = false;
     private brushWorldPosition = new Vec3();
+    private lastBrushWorldPosition = new Vec3();
+    private hasLastBrushPosition = false;
     private targetWorldPosition = new Vec3();
 
     private readonly boundOnDragStart = () => this.onDragStart();
@@ -123,6 +132,7 @@ export class SoapAdd extends Item {
         if (!this.isCurrentCleanManagerItem() || this.isDone) return;
 
         this.isDraggingSoap = true;
+        this.hasLastBrushPosition = false;
         this.startDragSound();
         this.hasActivatedTargetInCurrentDrag = false;
         this.startTrailParticle();
@@ -134,6 +144,7 @@ export class SoapAdd extends Item {
 
     public onDragEnd(): void {
         this.isDraggingSoap = false;
+        this.hasLastBrushPosition = false;
         this.stopDragSound();
         this.stopTrailParticle();
         for (const state of this.targetStates) {
@@ -141,18 +152,22 @@ export class SoapAdd extends Item {
         }
     }
 
-    protected lateUpdate(): void {
+    protected lateUpdate(dt: number): void {
         if (!this.isDraggingSoap) return;
         if (!this.isCurrentCleanManagerItem() || (this.itemDraggable && !this.itemDraggable.IsDragging)) {
             this.onDragEnd();
             return;
         }
-        this.checkTargets();
+        this.checkTargets(dt);
     }
 
-    private checkTargets(): void {
+    private checkTargets(dt = 0): void {
         const brush = this.brushPoint || this.node;
         brush.getWorldPosition(this.brushWorldPosition);
+        const isMoving = this.hasLastBrushPosition
+            && Vec3.distance(this.brushWorldPosition, this.lastBrushWorldPosition) >= this.scrubMinMove;
+        this.lastBrushWorldPosition.set(this.brushWorldPosition);
+        this.hasLastBrushPosition = true;
         const radiusSq = this.soapRadius * this.soapRadius;
         let isOverAnyTarget = false;
 
@@ -164,7 +179,14 @@ export class SoapAdd extends Item {
             const dy = this.brushWorldPosition.y - this.targetWorldPosition.y;
             const isInside = dx * dx + dy * dy <= radiusSq;
             if (isInside) isOverAnyTarget = true;
-            if (isInside && !state.wasInsideInLastFrame) {
+            if (this.scrubTimeToActivate > 0) {
+                // Chà lâu: cộng dồn thời gian brush di chuyển trong bán kính target.
+                if (isInside && isMoving) {
+                    state.scrubTime += dt;
+                    this.hasActivatedTargetInCurrentDrag = true;
+                    if (state.scrubTime >= this.scrubTimeToActivate) this.activateTarget(state);
+                }
+            } else if (isInside && !state.wasInsideInLastFrame) {
                 this.hitTarget(state);
             }
             state.wasInsideInLastFrame = isInside;
@@ -176,7 +198,11 @@ export class SoapAdd extends Item {
         state.hitCount++;
         this.hasActivatedTargetInCurrentDrag = true;
         if (state.hitCount < Math.max(1, this.hitsToActivate)) return;
+        this.activateTarget(state);
+    }
 
+    private activateTarget(state: SoapTargetState): void {
+        if (state.isActivated) return;
         state.isActivated = true;
         (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ReportCleanAction(state.node.worldPosition);
         if (this.playCutSound) Ply_SoundManager.Ins?.PlayFx(this.cutFxType);

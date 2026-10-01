@@ -1,4 +1,4 @@
-import { _decorator, Node, Tween, tween, UITransform, Vec3, Enum } from 'cc';
+import { _decorator, Animation, Node, Tween, tween, UITransform, Vec3, Enum } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
@@ -65,6 +65,12 @@ export class Vacuum extends Item {
     @property({ type: Enum(CleaningSoundMode), tooltip: 'Khi nào loop sound được bật.' })
     public dragSoundMode: CleaningSoundMode = CleaningSoundMode.Always;
 
+    @property({ type: [Node], tooltip: 'Các node bật lên khi đang kéo máy hút (ví dụ WindAnim), tắt khi thả tay.' })
+    public dragActiveNodes: Node[] = [];
+
+    @property({ type: Node, tooltip: 'Nơi spawn heart khi hút xong (ví dụ SandBox_Bot). Để trống: sandbox gần rác cuối cùng.' })
+    public heartTarget: Node | null = null;
+
     @property({ type: ItemCleanManager, tooltip: 'Để trống sẽ dùng ItemCleanManager.Ins.' })
     public itemCleanManager: ItemCleanManager | null = null;
 
@@ -128,16 +134,30 @@ export class Vacuum extends Item {
     }
 
     private onDragStart(): void {
-        if (!this.isCurrentCleanItem()) return;
+        if (!this.isCurrentCleanItem() || this._isCompleted) return;
         this._isDragging = true;
         this._suckedInDrag = false;
+        this.setDragNodesActive(true);
         this.updateDragSound(false);
         this.checkSuck();
     }
 
     private onDragEnd(): void {
         this._isDragging = false;
+        this.setDragNodesActive(false);
         this.stopDragSound();
+    }
+
+    /** Bật/tắt các node hiệu ứng khi kéo (ví dụ WindAnim) và play Animation của chúng. */
+    private setDragNodesActive(isActive: boolean): void {
+        for (const node of this.dragActiveNodes) {
+            if (!node?.isValid || node.active === isActive) continue;
+            node.active = isActive;
+            if (!isActive) continue;
+            const anim = node.getComponent(Animation);
+            const clip = anim?.defaultClip ?? anim?.clips[0];
+            if (anim && clip) anim.play(clip.name);
+        }
     }
 
     private onDropFail(): void {
@@ -227,8 +247,11 @@ export class Vacuum extends Item {
         this._isCompleted = true;
         this.isDone = true;
         this.stopDragSound();
+        this.setDragNodesActive(false);
         this.onAllTrashSucked.invoke();
-        (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
+        const manager = this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null;
+        if (this.heartTarget) manager?.SetHeartTarget(this.heartTarget);
+        manager?.ItemCleanDone();
     }
 
     private isCurrentCleanItem(): boolean {
