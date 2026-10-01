@@ -21,6 +21,7 @@ export enum FxType {
     SoapClean,
     BlowDryer,
     WaterStream,
+    Wipe
     
 }
 Enum(FxType);

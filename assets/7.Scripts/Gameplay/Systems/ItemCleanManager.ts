@@ -9,6 +9,8 @@ import type { BreakHeartEffect } from '../Effects/BreakHeartEffect';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { Ply_SoundManager, FxType } from '../Framework/Ply_SoundManager';
+import { CleanToolSlide } from '../Cleaning/CleanToolSlide';
+import { GameManager } from './GameManager';
 
 const { ccclass, property } = _decorator;
 
@@ -32,6 +34,15 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     @property({ type: Node, tooltip: 'Node đối tượng được dọn dẹp/làm đẹp (nếu có). Mỗi khi 1 item xong sẽ spawn heart tại đây.' })
     public targetItem: Node | null = null;
 
+    @property({ type: [Node], tooltip: 'Các đối tượng được dọn (ví dụ SandBox_Bot, SandBox_Top). Khi xong 1 bước, heart spawn ở đối tượng mà tool thao tác gần nhất (ưu tiên hơn targetItem). Có child "HeartPos" thì spawn tại đó.' })
+    public heartTargets: Node[] = [];
+
+    @property({ min: 0, tooltip: 'Hệ số scale heart khi spawn ở heartTargets.' })
+    public heartTargetScale = 1.8;
+
+    @property({ type: Node, tooltip: 'Khi tới lượt item này: kích hoạt nó (để HandTut gợi ý) rồi gọi GameManager.StopGame() - chạm bất kỳ đâu sẽ mở store.' })
+    public stopGameAtItem: Node | null = null;
+
     @property({ tooltip: 'Tự động kích hoạt lượt cho item đầu tiên khi bắt đầu' })
     public autoStart = true;
 
@@ -48,6 +59,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     public itemCleanDoneFxType: FxType = FxType.Complete;
 
     private hasCompletedSequence = false;
+    private isTransitioning = false;
+    private lastHeartTarget: Node | null = null;
+    private readonly _tempLocal = new Vec3();
     private readonly nonCurrentDropFailHandlers = new Map<Item, () => void>();
     private readonly nonCurrentDragStartHandlers = new Map<Item, () => void>();
     private readonly nonCurrentDropSuccessHandlers = new Map<Item, () => void>();
@@ -98,6 +112,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         this.bindNonCurrentDropFeedback();
         this.currentItemIndex = -1;
         this.hasCompletedSequence = false;
+        this.isTransitioning = false;
         console.log(`[ItemCleanManager] Start sequence (${this.items.length} item slot(s)).`);
         this.ActivateNextItem();
         this.scheduleOnce(() => {
@@ -120,7 +135,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
      * đánh dấu isDone = true, spawn HeartFX tại targetItem (nếu có) và kích hoạt lượt onProcess kế tiếp.
      */
     public ItemCleanDone(): void {
-        if (this.currentItemIndex < 0 || this.hasCompletedSequence) return;
+        if (this.currentItemIndex < 0 || this.hasCompletedSequence || this.isTransitioning) return;
 
         const currentItem = this.getItemAt(this.currentItemIndex);
         if (currentItem) {
@@ -137,8 +152,33 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         // Spawn Heart effect tại targetItem nếu được cấu hình
         this.spawnHeartAtTarget();
 
+        // Tool có CleanToolSlide.exitOnDone: bay xuống xong mới chuyển lượt.
+        const exitSlide = this.getExitSlide(this.currentItemIndex);
+        if (exitSlide) {
+            this.isTransitioning = true;
+            HandTutManager.Ins?.ResetHandTutDelay();
+            exitSlide.SlideOut(() => {
+                this.isTransitioning = false;
+                this.ActivateNextItem();
+            });
+            return;
+        }
+
         // Chuyển sang item tiếp theo
         this.ActivateNextItem();
+    }
+
+    /** CleanToolSlide cần bay xuống sau khi slot hiện tại xong (bỏ qua nếu slot kế tiếp vẫn là node đó). */
+    private getExitSlide(index: number): CleanToolSlide | null {
+        const node = this.items[index];
+        const slide = node?.isValid ? node.getComponent(CleanToolSlide) : null;
+        if (!slide?.exitOnDone) return null;
+
+        for (let i = index + 1; i < this.items.length; i++) {
+            if (!this.getItemAt(i)) continue;
+            return this.items[i] === node ? null : slide;
+        }
+        return slide;
     }
 
     /** Chuyển lượt sang item tiếp theo trong danh sách */
@@ -162,6 +202,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         this.updateItemsActiveState();
         const nextItem = this.getItemAt(nextIndex);
         if (nextItem) {
+            // Tool đang ẩn (inactive) sẽ bay từ dưới lên cùng các node appearTogether.
+            nextItem.getComponent(CleanToolSlide)?.SlideIn();
+
             const handTutManager = HandTutManager.Ins;
             // Clipper's opening hint should point at the cleaned object. Once
             // that hint is consumed, HandTutManager falls back to Clipper's
@@ -171,6 +214,11 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             }
             handTutManager?.SetDefaultTargetForItem(nextItem);
             console.log(`[ItemCleanManager] Start item ${nextIndex + 1}/${this.items.length}: ${nextItem.node.name} (${nextItem.constructor.name}).`);
+
+            if (this.stopGameAtItem && nextItem.node === this.stopGameAtItem) {
+                console.log(`[ItemCleanManager] Reached ${nextItem.node.name}: StopGame.`);
+                GameManager.Ins?.StopGame();
+            }
         }
     }
 
@@ -277,9 +325,46 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             && localPosition.y >= bottom && localPosition.y <= top;
     }
 
-    /** Spawn Heart effect từ Pool tại vị trí targetItem */
+    /**
+     * Tool gọi mỗi khi thao tác trúng (hót rác, xịt bọt, chà, rửa...).
+     * Ghi nhớ heartTarget chứa / gần điểm đó nhất để spawn heart khi bước hiện tại xong.
+     */
+    public ReportCleanAction(worldPos: Vec3): void {
+        let best: Node | null = null;
+        let bestDistSq = Number.POSITIVE_INFINITY;
+        for (const target of this.heartTargets) {
+            if (!target?.isValid || !target.activeInHierarchy) continue;
+            if (this.isPointInsideNode(worldPos, target)) {
+                best = target;
+                break;
+            }
+            const p = target.worldPosition;
+            const distSq = (p.x - worldPos.x) ** 2 + (p.y - worldPos.y) ** 2;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = target;
+            }
+        }
+        if (best) this.lastHeartTarget = best;
+    }
+
+    private isPointInsideNode(worldPos: Vec3, node: Node): boolean {
+        const transform = node.getComponent(UITransform);
+        if (!transform) return false;
+        transform.convertToNodeSpaceAR(worldPos, this._tempLocal);
+        const left = -transform.anchorX * transform.width;
+        const bottom = -transform.anchorY * transform.height;
+        return this._tempLocal.x >= left && this._tempLocal.x <= left + transform.width
+            && this._tempLocal.y >= bottom && this._tempLocal.y <= bottom + transform.height;
+    }
+
+    /** Spawn Heart effect từ Pool tại heartTarget vừa thao tác (hoặc targetItem). */
     private spawnHeartAtTarget(): void {
-        const spawnNode = this.getTargetSpawnNode();
+        const reported = this.lastHeartTarget?.isValid ? this.lastHeartTarget : null;
+        this.lastHeartTarget = null;
+        const spawnNode = reported
+            ? (reported.getChildByName('HeartPos') ?? reported)
+            : this.getTargetSpawnNode();
         if (!spawnNode) return;
 
         const spawnPos = spawnNode.worldPosition.clone();
@@ -289,7 +374,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
                 heart.node.setParent(spawnNode);
             }
             heart.node.setPosition(0, 0, 0);
-            heart.PlaySpawn();
+            heart.PlaySpawnWithScale(reported ? this.heartTargetScale : 1);
         }
     }
 

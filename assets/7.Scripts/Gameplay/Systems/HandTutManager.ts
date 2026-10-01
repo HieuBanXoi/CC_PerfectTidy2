@@ -255,6 +255,9 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         for (const item of this.items) {
             if (!item || this.boundItems.has(item)) continue;
             this.boundItems.add(item);
+            // Item trên node đang inactive (tool chưa bay lên) chưa chạy onLoad,
+            // nên lấy bổ sung các component tương tác trước khi bind.
+            item.cacheComponents(false);
             item.itemClickable?.onClick.addListener(() => this.RegisterCorrectAction());
             item.itemDraggable?.onBeginDrag.addListener(() => this.OnGameplayDragBegin());
             item.itemDraggable?.onDropSuccess.addListener(() => this.RegisterCorrectAction());

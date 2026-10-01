@@ -1,4 +1,4 @@
-import { _decorator, Node, ParticleSystem2D, Vec3, Enum } from 'cc';
+import { _decorator, Node, ParticleSystem2D, Tween, tween, UIOpacity, Vec3, Enum } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
@@ -51,6 +51,15 @@ export class SoapAdd extends Item {
 
     @property({ type: ParticleSystem2D, tooltip: 'Particle trail ở đầu SoapAdd. Tự lấy ParticleSystem2D con của Brush Point nếu để trống.' })
     public trailParticle: ParticleSystem2D | null = null;
+
+    @property({ type: [Node], tooltip: 'Các node được bật (hiện dần) khi tất cả target đã kích hoạt (ví dụ soap_sandbox).' })
+    public showOnAllDone: Node[] = [];
+
+    @property({ type: [Node], tooltip: 'Các node bị tắt (mờ dần) khi tất cả target đã kích hoạt (ví dụ dirty_sandbox).' })
+    public hideOnAllDone: Node[] = [];
+
+    @property({ min: 0, tooltip: 'Thời gian hiện/mờ của showOnAllDone/hideOnAllDone (giây). 0 = bật/tắt ngay.' })
+    public toggleFadeDuration = 0.4;
 
     @property({ type: ItemCleanManager, tooltip: 'Manager điều phối lượt; chỉ hoạt động khi SoapAdd có onProcess.' })
     public itemCleanManager: ItemCleanManager | null = null;
@@ -169,6 +178,7 @@ export class SoapAdd extends Item {
         if (state.hitCount < Math.max(1, this.hitsToActivate)) return;
 
         state.isActivated = true;
+        (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ReportCleanAction(state.node.worldPosition);
         if (this.playCutSound) Ply_SoundManager.Ins?.PlayFx(this.cutFxType);
         state.node.active = true;
         const particle = state.node.getComponent(ParticleSystem2D) ?? state.node.getComponentInChildren(ParticleSystem2D);
@@ -182,8 +192,42 @@ export class SoapAdd extends Item {
         this.onTargetActivated.invoke();
         if (this.targetStates.every(target => target.isActivated)) {
             this.isDone = true;
+            this.toggleNodesOnAllDone();
             this.onAllTargetsActivated.invoke();
             (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
+        }
+    }
+
+    private toggleNodesOnAllDone(): void {
+        const duration = this.toggleFadeDuration;
+        for (const node of this.showOnAllDone) {
+            if (!node?.isValid) continue;
+            const opacity = node.getComponent(UIOpacity) ?? node.addComponent(UIOpacity);
+            Tween.stopAllByTarget(opacity);
+            node.active = true;
+            if (duration <= 0) {
+                opacity.opacity = 255;
+                continue;
+            }
+            opacity.opacity = 0;
+            tween(opacity).to(duration, { opacity: 255 }, { easing: 'sineOut' }).start();
+        }
+
+        for (const node of this.hideOnAllDone) {
+            if (!node?.isValid) continue;
+            if (duration <= 0) {
+                node.active = false;
+                continue;
+            }
+            const opacity = node.getComponent(UIOpacity) ?? node.addComponent(UIOpacity);
+            Tween.stopAllByTarget(opacity);
+            tween(opacity)
+                .to(duration, { opacity: 0 }, { easing: 'sineIn' })
+                .call(() => {
+                    node.active = false;
+                    opacity.opacity = 255;
+                })
+                .start();
         }
     }
 

@@ -76,12 +76,14 @@ export class PoolManager extends Component{
   preLoad(poolAmounts: PoolAmount[]) {
     for (let i = 0; i < poolAmounts.length; i++) {
       let poolAmount = poolAmounts[i];
+      // Đọc PoolMember trực tiếp từ dữ liệu prefab, không cần instantiate thêm 1 bản.
+      let member = poolAmount.prefab.data.getComponent(PoolMember);
       let pool = new Pool(
         poolAmount.root,
         poolAmount.prefab,
-        poolAmount.amount
+        Math.max(poolAmount.amount, member?.prewarmAmount ?? 0)
       );
-      let type = instantiate(poolAmount.prefab).getComponent(PoolMember).type;
+      let type = member.type;
 
       if (!this.link.has(type)) {
         this.link.set(type, pool);        

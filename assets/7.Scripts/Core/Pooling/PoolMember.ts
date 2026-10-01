@@ -21,11 +21,15 @@ export enum PoolType {
     BreakHeartFX,
     BlinkFX,
     MergeVFX,
-    HairFX
+    HairFX,
+    Foam
 }
 
 @ccclass
 export class PoolMember extends Component{
     @property({type: Enum(PoolType)})
     type: PoolType = PoolType.Default;
+
+    @property({ min: 0, tooltip: 'Số instance tạo sẵn khi khởi động. Lấy giá trị lớn hơn giữa số này và PoolControl.prewarmAmount.' })
+    prewarmAmount: number = 0;
 }
