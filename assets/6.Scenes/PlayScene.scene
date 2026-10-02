@@ -19520,7 +19520,7 @@
     ],
     "heartTargetScale": 1.8,
     "stopGameAtItem": {
-      "__id__": 671
+      "__id__": 687
     },
     "autoStart": true,
     "onAllItemsCleaned": {
