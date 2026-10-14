@@ -25,6 +25,7 @@ export enum FxType {
     Shovel,
     SprayPuff,
     Tear,
+    WetWipeRub,
     
 }
 Enum(FxType);
@@ -52,6 +53,8 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
     public bgmSource: AudioSource = null!;
 
     private sourcesMap: Map<FxType, AudioSource> = new Map();
+    /** Các FxType đang phát loop (tự theo dõi, không dùng AudioSource.playing). */
+    private loopingTypes: Set<FxType> = new Set();
     private isMuted: boolean = false;
 
     protected onLoad() {
@@ -83,6 +86,7 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
         if (source.loop) {
             source.loop = false;
             source.stop();
+            this.loopingTypes.delete(type);
         }
 
         source.playOneShot(fxAudio.audioClip, fxAudio.volume);
@@ -130,13 +134,16 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
         if (!fxAudio || !fxAudio.audioClip) return;
 
         const source = this.GetOrCreateFxSource(type);
+        // Đang loop sẵn thì thôi. Không dựa vào source.playing: trên web nó cập nhật trễ
+        // sau stop(), làm lần phát loop thứ 2 bị bỏ qua (mất sfx khi kéo đồ lần 2).
+        if (this.loopingTypes.has(type)) return;
+
         source.clip = fxAudio.audioClip;
         source.volume = fxAudio.volume;
         source.loop = true;
-
-        if (!source.playing) {
-            source.play();
-        }
+        source.stop();
+        source.play();
+        this.loopingTypes.add(type);
     }
 
     /**
@@ -144,6 +151,7 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
      */
     public StopFxLoop(fxType: FxType | number) {
         const type = fxType as FxType;
+        this.loopingTypes.delete(type);
         const source = this.sourcesMap.get(type);
         if (source) {
             source.loop = false;
@@ -164,6 +172,7 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
                 source.stop();
             }
         });
+        this.loopingTypes.clear();
     }
 
     /**

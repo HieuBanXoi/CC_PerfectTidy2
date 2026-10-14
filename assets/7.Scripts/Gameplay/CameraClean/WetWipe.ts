@@ -30,6 +30,9 @@ export class WetWipe extends CameraCleanTool {
     @property({ type: Node, tooltip: 'Điểm HandTut chỉ tới khi gợi ý rút giấy.' })
     public pullHintTarget: Node | null = null;
 
+    @property({ tooltip: 'Khăn ướt sẵn từ đầu (không cần xịt nước).' })
+    public startWet = false;
+
     @property({ tooltip: 'Màu giấy khi ướt hoàn toàn.' })
     public wetColor: Color = new Color(150, 150, 160, 255);
 
@@ -74,6 +77,8 @@ export class WetWipe extends CameraCleanTool {
     protected onLoad(): void {
         super.onLoad();
         this._baseColor = this.spriteRenderer?.color.clone() ?? null;
+        // Khăn ướt sẵn: không cần bước xịt nước.
+        if (this.startWet) this.SetWet(1);
     }
 
     /** Lượt hiện tại là lượt rút giấy (không spawn heart khi xong). */
@@ -155,7 +160,11 @@ export class WetWipe extends CameraCleanTool {
         }
 
         if (this.getRemainingPrints().length === 0) this.finishFace();
-        return rubbing && isMoving;
+        // Tiếng lau: đang chà trên máy ảnh (vùng rộng hơn vùng vân tay). Base giữ tiếng thêm
+        // loopHoldTime nên tay khựng 1-2 frame không làm tiếng bị ngắt.
+        const camera = this.Face?.node.parent ?? null;
+        const overCamera = rubbing || (!!camera && this.isPointInside(this._point, camera, this.rubPadding));
+        return overCamera && isMoving;
     }
 
     protected onToolDropFail(): boolean {
@@ -178,6 +187,14 @@ export class WetWipe extends CameraCleanTool {
             this._pullReached = true;
             Ply_SoundManager.Ins?.PlayFx(this.pullFxType);
             this.fadeCover();
+            // Đúng lượt rút: xong lượt ngay và chuyển sang lượt lau trong cùng lần kéo
+            // (lấy khăn ra là lau được luôn, không cần thả tay).
+            if (this.IsCurrentStep) {
+                this._pulled = true;
+                // Rút xong vẫn giữ trên tay để lau luôn.
+                this.SkipReturnOnNextComplete();
+                this.Complete();
+            }
         }
         // Kéo ra một đoạn là đang thao tác đúng (thả sớm không BreakHeart),
         // nhưng rút giấy không phải đang lau nên không bật loop sound lau.

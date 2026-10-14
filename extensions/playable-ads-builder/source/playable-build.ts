@@ -54,22 +54,30 @@ function patchBaseHtml(src: { htmlContent: string; styleContent: string; jszipCo
         .replace(`System.import('./index.js').catch(function(err) { console.error(err); })`, () => launcherInit);
 }
 
+/**
+ * Kenh KHONG duoc chen "<base href="https://localhost/">" gia - xac nhan bang 1 file mau TikTok
+ * (kenh "woodout") da tung up thanh cong that su: file do hoan toan khong co base href. Facebook/
+ * Google/Mintegral da biet ro tu truoc (validator quet tinh URL "ben ngoai"); TikTok/OceanEngine/
+ * Pangle them vao day cung vi ly do tuong tu - rat co the day moi la nguyen nhan that cua loi
+ * "Khong tim thay SDK TikTok JS" (KHONG phai do SDK dung link ngoai - file mau van dung link ngoai
+ * binh thuong va van upload duoc, nen khong can nhung inline SDK nhu truoc).
+ */
+const NO_BASE_HREF_CHANNELS: CHANNEL[] = [CHANNEL.Facebook, CHANNEL.Google, CHANNEL.Mintegral, CHANNEL.TikTok, CHANNEL.OceanEngine, CHANNEL.Pangle];
+/** Rieng nhom nay dong goi zip.js thanh FILE RIENG trong zip thay vi nhung inline (xem packager.ts writeChannelSpecificFiles). */
+const EXTERNAL_ZIP_JS_CHANNELS: CHANNEL[] = [CHANNEL.Facebook, CHANNEL.Google, CHANNEL.Mintegral];
+
 async function buildChannelHtml(baseHtml: string, channel: CHANNEL, product: IProductInfo, zipJsContent: string): Promise<string> {
     let html = baseHtml;
     const apiText = getChannelApiText(channel, product);
     if (apiText) {
         html = html.replace('</head>', () => `${apiText}</head>`);
     }
-    // Facebook/Google/Mintegral: dong goi zip.js thanh 1 FILE RIENG trong zip (khong nhung inline,
-    // khong chen "<base href>" gia) - giong het cach Facebook da lam tu truoc (packager.ts cung ghi
-    // zip.js cho ca 3 kenh nay, xem writeChannelSpecificFiles). Ly do: validator cua Google/Mintegral
-    // cung quet tinh file tim URL "ben ngoai" nhu Facebook truoc day va tu choi neu thay base href gia.
-    if (channel === CHANNEL.Facebook || channel === CHANNEL.Google || channel === CHANNEL.Mintegral) {
-        html = html.replace('<script src="src/polyfills.bundle.js" charset="utf-8"> </script>', () => '<script src="zip.js" type="text/javascript"></script>');
-    } else {
+    if (!NO_BASE_HREF_CHANNELS.includes(channel)) {
         html = html.replace('<head>', () => '<head>\n<base href="https://localhost/">');
-        html = html.replace('<script src="src/polyfills.bundle.js" charset="utf-8"> </script>', () => `<script>${zipJsContent}</script>`);
     }
+    html = EXTERNAL_ZIP_JS_CHANNELS.includes(channel)
+        ? html.replace('<script src="src/polyfills.bundle.js" charset="utf-8"> </script>', () => '<script src="zip.js" type="text/javascript"></script>')
+        : html.replace('<script src="src/polyfills.bundle.js" charset="utf-8"> </script>', () => `<script>${zipJsContent}</script>`);
     const specific = getChannelSpecificScript(channel);
     if (specific.scriptContent) {
         html = html.replace(specific.replaceTarget, () => `${specific.scriptContent}\n${specific.replaceTarget}`);

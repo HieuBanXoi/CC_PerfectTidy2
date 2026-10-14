@@ -17,6 +17,7 @@ Enum(TypeHind);
 /** Optional target collections exposed by the cleaning-item components. */
 interface HandTutTargetProvider extends Item {
     GetHandTutTarget?: () => Node | null;
+    GetHandTutStart?: () => Node | null;
     cleanTarget?: Node | null;
     cleanTargetStep2?: Node | null;
     targetNodes?: Node[];
@@ -304,7 +305,9 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
             this.TypeHind = TypeHind.Click;
             this.consumeFirstTutorialTarget(item);
         } else if (this.isDraggableReady(item) && this.hasValidDragTarget(item)) {
-            this.playMoveHint(item.node, item.itemMoveToTarget!.defaultTarget);
+            // Item có thể chỉ định điểm bắt đầu riêng (ví dụ vuốt dọc đường xé).
+            const customStart = (item as HandTutTargetProvider).GetHandTutStart?.();
+            this.playMoveHint(customStart?.isValid ? customStart : item.node, item.itemMoveToTarget!.defaultTarget);
             this.currentItemHandTut = item;
             this.TypeHind = TypeHind.Drag;
             this.consumeFirstTutorialTarget(item);

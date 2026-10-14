@@ -2,6 +2,7 @@ import { _decorator, Enum, Node, Tween, tween, UITransform, Vec3 } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
+import { InputManager } from '../../Core/Managers/InputManager';
 import { Ply_SoundManager, FxType } from '../Framework/Ply_SoundManager';
 import { CameraFace } from './CameraFace';
 import { CameraFaceController } from './CameraFaceController';
@@ -26,6 +27,9 @@ export class CameraCleanTool extends Item {
     @property({ type: ItemCleanManager, tooltip: 'Để trống: ItemCleanManager.Ins.' })
     public itemCleanManager: ItemCleanManager | null = null;
 
+    @property({ tooltip: 'Làm sạch xong thì tự nhả tay và quay về chỗ cũ.' })
+    public returnOnComplete = true;
+
     @property({ tooltip: 'Spawn heart khi xong lượt của tool này.' })
     public spawnHeartOnDone = true;
 
@@ -41,6 +45,9 @@ export class CameraCleanTool extends Item {
     @property({ tooltip: 'Phát loop sound khi đang làm sạch.' })
     public playLoopSound = true;
 
+    @property({ min: 0, tooltip: 'Ngừng làm sạch bao lâu (giây) mới tắt loop sound, tránh tiếng bị ngắt quãng.' })
+    public loopHoldTime = 0.25;
+
     @property({ type: Enum(FxType) })
     public loopFxType: FxType = FxType.Clean1;
 
@@ -51,6 +58,8 @@ export class CameraCleanTool extends Item {
     protected readonly _lastPoint = new Vec3();
     protected readonly _dragStartWorld = new Vec3();
     private _isPlayingLoop = false;
+    private _skipReturnOnce = false;
+    private _loopIdleTime = 0;
     private readonly _tempLocal = new Vec3();
 
     private _restAngle = 0;
@@ -191,6 +200,30 @@ export class CameraCleanTool extends Item {
         this.isDone = true;
         this.stopLoop();
         this.Manager?.ItemCleanDone();
+
+        const skipReturn = this._skipReturnOnce;
+        this._skipReturnOnce = false;
+        if (this.returnOnComplete && !skipReturn) this.releaseAndReturn();
+    }
+
+    /** Lần Complete kế tiếp không tự nhả tay (ví dụ rút khăn xong lau luôn trong cùng lần kéo). */
+    protected SkipReturnOnNextComplete(): void {
+        this._skipReturnOnce = true;
+    }
+
+    /**
+     * Xong việc mà người chơi vẫn đang cầm: nhả tay ngay. Drop fail của tool đã xong sẽ
+     * tự về chỗ cũ (không BreakHeart) trong handleDropFail.
+     */
+    private releaseAndReturn(): void {
+        const draggable = this.itemDraggable;
+        if (!draggable?.IsDragging) return;
+        const input = InputManager.Ins as InputManager | null;
+        if (input?.IsDraggingItem()) {
+            input.EndInteraction();
+        } else {
+            draggable.EndDrag();
+        }
     }
 
     protected isPointInside(worldPoint: Vec3, node: Node | null, worldPadding = 0): boolean {
@@ -251,12 +284,20 @@ export class CameraCleanTool extends Item {
 
         (this.cleanPoint ?? this.node).getWorldPosition(this._point);
         const acting = this.onToolDrag(dt);
+        // onToolDrag có thể vừa làm xong (Complete -> tự nhả tay): không bật lại loop sound.
+        if (!this._isDragging || this._completed) {
+            this.stopLoop();
+            return;
+        }
         if (acting) {
             this._actedInDrag = true;
+            this._loopIdleTime = 0;
             this.startLoop();
             this.Manager?.ReportCleanAction(this._point);
         } else {
-            this.stopLoop();
+            // Giữ tiếng thêm loopHoldTime để không bị ngắt quãng khi tay khựng 1-2 frame.
+            this._loopIdleTime += dt;
+            if (this._loopIdleTime >= this.loopHoldTime) this.stopLoop();
         }
         this._lastPoint.set(this._point);
     }
