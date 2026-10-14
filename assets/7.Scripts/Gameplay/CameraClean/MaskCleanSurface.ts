@@ -110,18 +110,35 @@ export class MaskCleanSurface extends Component {
 
     // ---------------- Public API ----------------
 
-    /** Lau theo đoạn thẳng (tránh đứt nét khi kéo nhanh). swab = true: lớp lau sạch hẳn. */
-    public PaintBetween(fromWorld: Vec3, toWorld: Vec3, worldRadius: number, swab: boolean): void {
+    /**
+     * Lau theo đoạn thẳng (tránh đứt nét khi kéo nhanh). swab = true: lớp lau sạch hẳn.
+     * strength = 1: lau sạch ngay trong vùng cọ.
+     * strength < 1: độ sạch thêm vào mỗi khi cọ quét QUA một điểm (tính theo quãng đường cọ đi,
+     * không theo số frame), ví dụ 0.35 ≈ 3 lượt quét mới sạch. Cọ đứng yên thì không lau thêm.
+     */
+    public PaintBetween(fromWorld: Vec3, toWorld: Vec3, worldRadius: number, swab: boolean, strength = 1): void {
         if (!this.ensureAnalyzed()) return;
         const distance = Vec3.distance(fromWorld, toWorld);
         const steps = Math.max(1, Math.ceil(distance / Math.max(1, worldRadius * 0.3)));
-        for (let i = 0; i <= steps; i++) {
+
+        if (strength >= 1) {
+            for (let i = 0; i <= steps; i++) {
+                Vec3.lerp(this._lerp, fromWorld, toWorld, i / steps);
+                this.Paint(this._lerp, worldRadius, swab, 1);
+            }
+            return;
+        }
+
+        if (distance < 0.5) return;
+        // Một lượt quét qua 1 điểm dài khoảng 2 * bán kính: chia strength theo đoạn đường mỗi bước.
+        const stampStrength = strength * (distance / steps) / Math.max(1, worldRadius * 2);
+        for (let i = 1; i <= steps; i++) {
             Vec3.lerp(this._lerp, fromWorld, toWorld, i / steps);
-            this.Paint(this._lerp, worldRadius, swab);
+            this.Paint(this._lerp, worldRadius, swab, stampStrength);
         }
     }
 
-    public Paint(worldPos: Vec3, worldRadius: number, swab: boolean): void {
+    public Paint(worldPos: Vec3, worldRadius: number, swab: boolean, strength = 1): void {
         if (!this.ensureAnalyzed()) return;
         const transform = this.getTransform()!;
         const scale = Math.max(0.0001, Math.abs(this.node.worldScale.x));
@@ -146,11 +163,14 @@ export class MaskCleanSurface extends Component {
                 const dx = x + 0.5 - cx;
                 const dist = Math.sqrt(dx * dx + dy * dy);
                 if (dist > r) continue;
-                const strength = dist <= inner ? 1 : clamp01(1 - (dist - inner) / Math.max(0.0001, r - inner));
+                const falloff = dist <= inner ? 1 : clamp01(1 - (dist - inner) / Math.max(0.0001, r - inner));
+                if (falloff <= 0) continue;
                 const index = y * this._w + x;
-                let target = Math.round(strength * 255);
-                if (!swab) target = Math.min(target, this._cap[index]);
                 const old = this._buffer[index * 4];
+                let target = strength >= 1
+                    ? Math.round(falloff * 255)
+                    : Math.min(255, old + Math.max(1, Math.round(falloff * 255 * strength)));
+                if (!swab) target = Math.min(target, this._cap[index]);
                 if (target <= old) continue;
                 this.setPixel(index, target);
                 this.trackChange(index, old, target);

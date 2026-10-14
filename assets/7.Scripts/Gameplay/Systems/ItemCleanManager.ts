@@ -1,4 +1,4 @@
-import { _decorator, Node, UITransform, Vec2, Vec3, Enum } from 'cc';
+import { _decorator, director, Node, UITransform, Vec2, Vec3, Enum } from 'cc';
 import { PoolType } from '../../Core/Pooling/PoolMember';
 import { World } from '../../Core/Managers/World';
 import { Ply_Event } from '../Framework/Ply_Event';
@@ -37,6 +37,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     @property({ type: [Node], tooltip: 'Các đối tượng được dọn (ví dụ SandBox_Bot, SandBox_Top). Khi xong 1 bước, heart spawn ở đối tượng mà tool thao tác gần nhất (ưu tiên hơn targetItem). Có child "HeartPos" thì spawn tại đó.' })
     public heartTargets: Node[] = [];
 
+    @property({ min: 0, tooltip: 'Thời gian tối thiểu (giây) giữa 2 lần hiện BreakHeart khi kéo sai, tránh spam.' })
+    public breakHeartCooldown = 1.5;
+
     @property({ min: 0, tooltip: 'Hệ số scale heart khi spawn ở heartTargets.' })
     public heartTargetScale = 1.8;
 
@@ -64,6 +67,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     private hasCompletedSequence = false;
     private isTransitioning = false;
     private lastHeartTarget: Node | null = null;
+    private lastBreakHeartTime = -999;
     private readonly _tempLocal = new Vec3();
     private readonly nonCurrentDropFailHandlers = new Map<Item, () => void>();
     private readonly nonCurrentDragStartHandlers = new Map<Item, () => void>();
@@ -237,6 +241,8 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             // Tool dùng lại cho nhiều lượt (ví dụ mỗi mặt máy ảnh) reset trạng thái theo lượt mới.
             (nextItem as unknown as { OnCleanStepStart?: () => void }).OnCleanStepStart?.();
             handTutManager?.SetDefaultTargetForItem(nextItem);
+            // Gợi ý bước mới sớm để người chơi biết làm gì tiếp.
+            handTutManager?.HintNextStepSoon();
             console.log(`[ItemCleanManager] Start item ${nextIndex + 1}/${this.items.length}: ${nextItem.node.name} (${nextItem.constructor.name}).`);
 
             const stopByIndex = this.stopGameAtIndex >= 0 && nextIndex === this.stopGameAtIndex;
@@ -427,6 +433,12 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     }
 
     private spawnBreakHeartAtItem(item: Item, overTarget: Node | null = null): void {
+        // Chống spam: kéo sai liên tục chỉ hiện 1 BreakHeart trong breakHeartCooldown.
+        // (Lượt kéo vẫn được tính là sai: về chỗ cũ, không hiện thêm BreakHeart ở item.)
+        const now = director.getTotalTime() / 1000;
+        if (now - this.lastBreakHeartTime < this.breakHeartCooldown) return;
+        this.lastBreakHeartTime = now;
+
         // Wrong-turn feedback is shown on the cleaned object: the sandbox the
         // item was dragged into (its HeartPos), otherwise the target item's
         // spawn point, otherwise the dragged item.

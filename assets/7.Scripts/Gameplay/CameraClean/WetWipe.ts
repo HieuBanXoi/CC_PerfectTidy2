@@ -179,8 +179,10 @@ export class WetWipe extends CameraCleanTool {
             Ply_SoundManager.Ins?.PlayFx(this.pullFxType);
             this.fadeCover();
         }
-        // Kéo ra một đoạn là đang thao tác đúng (thả sớm không BreakHeart).
-        return distance > 20;
+        // Kéo ra một đoạn là đang thao tác đúng (thả sớm không BreakHeart),
+        // nhưng rút giấy không phải đang lau nên không bật loop sound lau.
+        if (distance > 20) this._actedInDrag = true;
+        return false;
     }
 
     private warnDryWipe(): void {

@@ -48,6 +48,11 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     @property({ min: 0 }) public breakHeartNoDelayThreshold = 3;
     @property({ min: 0 }) public maxHandTutShowCount = 0;
 
+    @property({ min: 0, tooltip: 'Sau khi chuyển sang bước mới, gợi ý bước đó sau bao lâu (giây).' })
+    public nextStepHintDelay = 1;
+
+    private nextStepPending = false;
+
     @property({ min: 0.01 }) public moveDuration = 1.2;
     @property({ min: 0.01 }) public clickScaleDuration = 0.35;
     @property({ min: 0 }) public waitAtEndDuration = 0.2;
@@ -207,6 +212,12 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     /** Hides the current hint and restarts its idle delay without pausing future hints. */
     public ResetHandTutDelay(): void {
         this.hideHandTut();
+        this.resetIdleTimer();
+    }
+
+    /** Vừa chuyển sang bước mới: gợi ý bước đó sau nextStepHintDelay thay vì đợi idleDelay. */
+    public HintNextStepSoon(): void {
+        this.nextStepPending = true;
         this.resetIdleTimer();
     }
 
@@ -487,6 +498,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         this.shownCount++;
         this.hasShownFirstHint = true;
         this.forceNoDelay = false;
+        this.nextStepPending = false;
         return this.currentHintToken;
     }
 
@@ -518,6 +530,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     }
 
     private getCurrentDelay(): number {
+        if (this.nextStepPending) return this.nextStepHintDelay;
         if (this.forceNoDelay || this.shownCount < this.noDelayItemCount) return this.shortIdleDelay;
         return this.hasShownFirstHint ? this.idleDelay : this.firstHandTutDelay;
     }
