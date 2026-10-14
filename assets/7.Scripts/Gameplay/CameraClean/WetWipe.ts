@@ -1,4 +1,5 @@
-import { _decorator, Color, Node, Sprite, Tween, tween, UIOpacity, Vec3 } from 'cc';
+import { _decorator, Color, Enum, Node, Sprite, Tween, tween, UIOpacity, Vec3 } from 'cc';
+import { Ply_SoundManager, FxType } from '../Framework/Ply_SoundManager';
 import { CameraCleanTool } from './CameraCleanTool';
 import { CameraFaceController } from './CameraFaceController';
 import { WipeCorner } from './WipeCorner';
@@ -23,6 +24,9 @@ export class WetWipe extends CameraCleanTool {
     @property({ min: 0, tooltip: 'Khoảng cách kéo (world) để tính là đã rút giấy.' })
     public pullDistance = 220;
 
+    @property({ type: Enum(FxType), tooltip: 'Sound khi rút giấy ra đủ xa.' })
+    public pullFxType: FxType = FxType.Wipe;
+
     @property({ type: Node, tooltip: 'Điểm HandTut chỉ tới khi gợi ý rút giấy.' })
     public pullHintTarget: Node | null = null;
 
@@ -33,7 +37,12 @@ export class WetWipe extends CameraCleanTool {
     public rubTimePerPrint = 0.6;
 
     @property({ min: 0, tooltip: 'Nới rộng vùng vân tay khi kiểm tra chà trúng (world).' })
-    public rubPadding = 30;
+    public rubPadding = 70;
+
+    @property({ min: 0, tooltip: 'Lau xong 1 mặt: đợi heart hiện (giây) rồi mới punch + đổi mặt.' })
+    public faceSwitchDelay = 0.8;
+
+    private _switchFaceAfterDone = false;
 
     private _pulled = false;
     private _pullReached = false;
@@ -72,6 +81,10 @@ export class WetWipe extends CameraCleanTool {
 
     public ShouldSpawnHeartOnDone(): boolean {
         return !this._isPullStep && super.ShouldSpawnHeartOnDone();
+    }
+
+    public ShouldPlayDoneSound(): boolean {
+        return !this._isPullStep && super.ShouldPlayDoneSound();
     }
 
     /** Rút giấy được trước lượt (khi đã bóc góc); lau thì phải đúng lượt. */
@@ -163,6 +176,7 @@ export class WetWipe extends CameraCleanTool {
         const distance = Vec3.distance(this.node.worldPosition, this._dragStartWorld);
         if (!this._pullReached && distance >= this.pullDistance) {
             this._pullReached = true;
+            Ply_SoundManager.Ins?.PlayFx(this.pullFxType);
             this.fadeCover();
         }
         // Kéo ra một đoạn là đang thao tác đúng (thả sớm không BreakHeart).
@@ -192,12 +206,22 @@ export class WetWipe extends CameraCleanTool {
     private finishFace(): void {
         if (this._finishing) return;
         this._finishing = true;
+        this._switchFaceAfterDone = true;
+        // Báo xong ngay để heart hiện trên mặt hiện tại; đổi mặt chạy trong PlayDoneTransition.
+        this.Complete();
+    }
+
+    /**
+     * ItemCleanManager gọi sau khi spawn heart: đợi heart hiện xong rồi punch + đổi mặt,
+     * xong mới chuyển lượt. Trả về false nếu không cần đổi mặt.
+     */
+    public PlayDoneTransition(onDone: () => void): boolean {
+        if (!this._switchFaceAfterDone) return false;
+        this._switchFaceAfterDone = false;
         const controller = this.faceController ?? CameraFaceController.Ins;
-        if (controller) {
-            controller.SwitchToNextFace(() => this.Complete());
-        } else {
-            this.Complete();
-        }
+        if (!controller) return false;
+        this.scheduleOnce(() => controller.SwitchToNextFace(onDone), this.faceSwitchDelay);
+        return true;
     }
 
     private getRemainingPrints(): Node[] {

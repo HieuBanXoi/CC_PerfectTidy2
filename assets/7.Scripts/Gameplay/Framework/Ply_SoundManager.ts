@@ -23,6 +23,8 @@ export enum FxType {
     WaterStream,
     Wipe,
     Shovel,
+    SprayPuff,
+    Tear,
     
 }
 Enum(FxType);

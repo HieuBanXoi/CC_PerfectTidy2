@@ -29,6 +29,9 @@ export class CameraCleanTool extends Item {
     @property({ tooltip: 'Spawn heart khi xong lượt của tool này.' })
     public spawnHeartOnDone = true;
 
+    @property({ tooltip: 'Phát sound hoàn thành (ItemCleanManager.itemCleanDoneFxType) khi xong lượt của tool này.' })
+    public playDoneSound = true;
+
     @property({ tooltip: 'Khi kéo: xoay tool cho đầu làm sạch (cleanPoint) chỉ thẳng lên trên; thả tay xoay về góc cũ.' })
     public rotateUpOnDrag = false;
 
@@ -149,6 +152,11 @@ export class CameraCleanTool extends Item {
     /** ItemCleanManager hỏi trước khi spawn heart cho lượt vừa xong. */
     public ShouldSpawnHeartOnDone(): boolean {
         return this.spawnHeartOnDone;
+    }
+
+    /** ItemCleanManager hỏi trước khi phát sound hoàn thành cho lượt vừa xong. */
+    public ShouldPlayDoneSound(): boolean {
+        return this.playDoneSound;
     }
 
     // ---------------- Hook cho lớp con ----------------

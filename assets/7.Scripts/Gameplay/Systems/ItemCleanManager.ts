@@ -145,7 +145,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             console.log(`[ItemCleanManager] Done item ${this.currentItemIndex + 1}/${this.items.length}: ${currentItem.node.name} (${currentItem.constructor.name}).`);
             currentItem.isDone = true;
             currentItem.onProcess = false;
-            if (this.playItemCleanDoneSound) {
+            // Item có thể tự tắt sound hoàn thành (ví dụ bước bóc khăn, xịt nước).
+            const soundCheck = currentItem as unknown as { ShouldPlayDoneSound?: () => boolean };
+            if (this.playItemCleanDoneSound && (soundCheck.ShouldPlayDoneSound?.() ?? true)) {
                 Ply_SoundManager.Ins?.PlayFx(this.itemCleanDoneFxType);
             }
         } else {
@@ -158,6 +160,18 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             this.spawnHeartAtTarget();
         } else {
             this.lastHeartTarget = null;
+        }
+
+        // Item có hiệu ứng sau khi xong (ví dụ đổi mặt máy ảnh): chạy xong mới chuyển lượt.
+        const transition = currentItem as unknown as { PlayDoneTransition?: (onDone: () => void) => boolean } | null;
+        if (transition?.PlayDoneTransition) {
+            this.isTransitioning = true;
+            const handled = transition.PlayDoneTransition(() => {
+                this.isTransitioning = false;
+                this.ActivateNextItem();
+            });
+            if (handled) return;
+            this.isTransitioning = false;
         }
 
         // Tool có CleanToolSlide.exitOnDone: bay xuống xong mới chuyển lượt.
@@ -387,7 +401,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
 
     /** Spawn Heart effect từ Pool tại heartTarget vừa thao tác (hoặc targetItem). */
     private spawnHeartAtTarget(): void {
-        const reported = this.lastHeartTarget?.isValid ? this.lastHeartTarget : null;
+        // Chưa có thao tác nào được báo trong lượt này thì dùng heartTarget đầu tiên (nếu có).
+        const reported = (this.lastHeartTarget?.isValid ? this.lastHeartTarget : null)
+            ?? this.heartTargets.find(target => target?.isValid && target.activeInHierarchy) ?? null;
         this.lastHeartTarget = null;
         const spawnNode = reported
             ? (reported.getChildByName('HeartPos') ?? reported)
