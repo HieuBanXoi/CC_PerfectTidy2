@@ -1,4 +1,4 @@
-import { _decorator, Color, Enum, input, Input, Node, Sprite, Tween, tween, Vec3 } from 'cc';
+import { _decorator, Color, Enum, input, Input, Node, Sprite, Tween, tween, UIOpacity, Vec3 } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemType } from '../Items/Components/ItemType';
 import { ItemStirring } from '../Items/Components/ItemStirring';
@@ -81,6 +81,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     @property({ type: Sprite, tooltip: 'Optional Sprite component on the hand node for alpha fading.' })
     public handSprite: Sprite | null = null;
     private handDefaultColor = new Color(255, 255, 255, 255);
+    private handOpacity: UIOpacity | null = null;
     private currentHintToken = 0;
     private activeAuxTween: Tween<object> | null = null;
     private activeFadeTween: Tween<object> | null = null;
@@ -439,13 +440,6 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     private fadeOutThenLoop(token: number, loop: () => void): void {
         if (!this.isHintCurrent(token)) return;
 
-        if (!this.handSprite) {
-            this.setHandAlpha(0);
-            this.scheduleOnce(() => {
-                if (this.isHintCurrent(token)) loop();
-            }, this.waitAtEndDuration);
-            return;
-        }
 
         const fadeState = { alpha: this.handDefaultAlpha };
         this.activeFadeTween = tween(fadeState)
@@ -516,10 +510,11 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     }
 
     private setHandAlpha(alpha: number): void {
-        if (!this.handSprite) return;
-        const color = this.handSprite.color;
-        color.set(this.handDefaultColor.r, this.handDefaultColor.g, this.handDefaultColor.b, alpha);
-        this.handSprite.color = color;
+        if (!this.handNode?.isValid) return;
+        // Dùng UIOpacity trên node tay: gán lại cùng object Color cho Sprite.color
+        // bị engine bỏ qua (không vẽ lại), nên tay không mờ trên màn hình.
+        this.handOpacity ??= this.handNode.getComponent(UIOpacity) ?? this.handNode.addComponent(UIOpacity);
+        this.handOpacity.opacity = Math.max(0, Math.min(255, Math.round(alpha)));
     }
 
     private getCurrentDelay(): number {

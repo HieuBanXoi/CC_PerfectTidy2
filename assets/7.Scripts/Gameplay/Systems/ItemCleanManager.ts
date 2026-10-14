@@ -43,6 +43,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
     @property({ type: Node, tooltip: 'Khi tới lượt item này: kích hoạt nó (để HandTut gợi ý) rồi gọi GameManager.StopGame() - chạm bất kỳ đâu sẽ mở store.' })
     public stopGameAtItem: Node | null = null;
 
+    @property({ tooltip: 'Index (trong items) của lượt sẽ StopGame. >= 0 thì dùng thay cho stopGameAtItem (cần khi 1 node xuất hiện nhiều lần). -1 = không dùng.' })
+    public stopGameAtIndex = -1;
+
     @property({ tooltip: 'Tự động kích hoạt lượt cho item đầu tiên khi bắt đầu' })
     public autoStart = true;
 
@@ -149,8 +152,13 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             console.warn(`[ItemCleanManager] Done was called for invalid item slot ${this.currentItemIndex + 1}.`);
         }
 
-        // Spawn Heart effect tại targetItem nếu được cấu hình
-        this.spawnHeartAtTarget();
+        // Spawn Heart effect tại targetItem nếu được cấu hình (item có thể tự tắt, ví dụ bước bóc khăn giấy).
+        const heartCheck = currentItem as unknown as { ShouldSpawnHeartOnDone?: () => boolean } | null;
+        if (heartCheck?.ShouldSpawnHeartOnDone?.() ?? true) {
+            this.spawnHeartAtTarget();
+        } else {
+            this.lastHeartTarget = null;
+        }
 
         // Tool có CleanToolSlide.exitOnDone: bay xuống xong mới chuyển lượt.
         const exitSlide = this.getExitSlide(this.currentItemIndex);
@@ -212,10 +220,14 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             if (nextIndex === 0 && typeof (nextItem as unknown as { GetHandTutTarget?: unknown }).GetHandTutTarget === 'function') {
                 handTutManager?.SetFirstTutorialTarget(nextItem, this.targetItem);
             }
+            // Tool dùng lại cho nhiều lượt (ví dụ mỗi mặt máy ảnh) reset trạng thái theo lượt mới.
+            (nextItem as unknown as { OnCleanStepStart?: () => void }).OnCleanStepStart?.();
             handTutManager?.SetDefaultTargetForItem(nextItem);
             console.log(`[ItemCleanManager] Start item ${nextIndex + 1}/${this.items.length}: ${nextItem.node.name} (${nextItem.constructor.name}).`);
 
-            if (this.stopGameAtItem && nextItem.node === this.stopGameAtItem) {
+            const stopByIndex = this.stopGameAtIndex >= 0 && nextIndex === this.stopGameAtIndex;
+            const stopByNode = this.stopGameAtIndex < 0 && !!this.stopGameAtItem && nextItem.node === this.stopGameAtItem;
+            if (stopByIndex || stopByNode) {
                 console.log(`[ItemCleanManager] Reached ${nextItem.node.name}: StopGame.`);
                 GameManager.Ins?.StopGame();
             }
@@ -272,7 +284,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
 
             const dragStartHandler = () => {
                 this.cleanItemDragStates.set(item, {
-                    startedAsCurrent: item.onProcess,
+                    // Tool được phép thao tác trước lượt (bóc khăn, xịt nước...) không bị tính là kéo sai lượt.
+                    startedAsCurrent: item.onProcess
+                        || !!(item as unknown as { CanWorkOffTurnNow?: () => boolean }).CanWorkOffTurnNow?.(),
                     // Treat the first frame of a drag as an entry check too.
                     wasOverTarget: false,
                     breakHeartSpawned: false,
@@ -389,6 +403,11 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
             heart.node.setPosition(0, 0, 0);
             heart.PlaySpawnWithScale(reported ? this.heartTargetScale : 1);
         }
+    }
+
+    /** Spawn BreakHeart trên target (nếu là heartTarget thì ở HeartPos của nó). */
+    public SpawnBreakHeartOnTarget(item: Item, target: Node | null): void {
+        this.spawnBreakHeartAtItem(item, target);
     }
 
     private spawnBreakHeartAtItem(item: Item, overTarget: Node | null = null): void {
