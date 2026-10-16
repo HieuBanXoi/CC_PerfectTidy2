@@ -13538,7 +13538,7 @@
     "spawnPoint": {
       "__id__": 393
     },
-    "spawnCountPerClick": 36,
+    "spawnCountPerClick": 1,
     "canClick": true,
     "maxClicks": 0,
     "allowRapidClick": true,
