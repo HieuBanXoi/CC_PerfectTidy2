@@ -5796,7 +5796,7 @@
     "isTutorial": true,
     "isGotoStore": false,
     "isLoseGame": false,
-    "maxMoves": 5,
+    "maxMoves": 10,
     "countMove": 0,
     "goToStoreOnMaxMoves": true,
     "showStoreDialogInWebPreview": true,
