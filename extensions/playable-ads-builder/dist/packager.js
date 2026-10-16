@@ -107,7 +107,6 @@ async function zipFolder(dir, zip) {
  * `product` = thông tin game (dùng cho luna.json của UnityPlayworks).
  */
 async function writeChannelSpecificFiles(channel, dir, htmlContent, zipJsContent, product) {
-    const htmlFileName = path.basename(dir) + '.html';
     switch (channel) {
         case channels_1.CHANNEL.UnityPlayworks: {
             const withStartGame = (html) => {
@@ -138,19 +137,26 @@ async function writeChannelSpecificFiles(channel, dir, htmlContent, zipJsContent
             break;
         }
         case channels_1.CHANNEL.Mintegral:
-            await fs.writeFile(path.join(dir, htmlFileName), htmlContent, 'utf-8');
-            break;
         case channels_1.CHANNEL.Facebook:
-            await fs.writeFile(path.join(dir, 'zip.js'), zipJsContent, 'utf-8');
-            await fs.writeFile(path.join(dir, 'index.html'), htmlContent, 'utf-8');
-            break;
         case channels_1.CHANNEL.Google:
+            // Ca 3 kenh nay dung chung 1 cach dong goi: zip.js la FILE RIENG (khop voi
+            // "<script src="zip.js">" da chen trong buildChannelHtml), khong nhung inline.
+            await fs.writeFile(path.join(dir, 'zip.js'), zipJsContent, 'utf-8');
             await fs.writeFile(path.join(dir, 'index.html'), htmlContent, 'utf-8');
             break;
         case channels_1.CHANNEL.TikTok:
         case channels_1.CHANNEL.OceanEngine:
         case channels_1.CHANNEL.Pangle:
-            await fs.writeFile(path.join(dir, 'config.json'), '{ "playable_orientation": 0 }', 'utf-8');
+            // QUAN TRONG: key phai la "playable_orientation" CHU THUONG - doc chinh thuc cua
+            // TikTok ghi hoa chu P ("Playable_orientation") nhung la SAI, validator that doi hoi
+            // dung chu thuong (da kiem chung bang 1 file mau tung up thanh cong that su). Tung
+            // doi sang chu hoa theo doc truoc day -> chinh la nguyen nhan loi "thieu
+            // Playable_orientation" - validator tim key chu thuong khong thay. "playable_languages"
+            // cung lay dung tu file mau do (khong ro bat buoc hay khong, giu cho an toan).
+            await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify({
+                playable_orientation: 0,
+                playable_languages: ['ja', 'zh', 'ar', 'es', 'en', 'ko', 'pt', 'ru', 'vi'],
+            }), 'utf-8');
             await fs.writeFile(path.join(dir, 'index.html'), htmlContent, 'utf-8');
             break;
         case channels_1.CHANNEL.Kuaishou:
