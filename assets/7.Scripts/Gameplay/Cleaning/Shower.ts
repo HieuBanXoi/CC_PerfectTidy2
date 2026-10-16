@@ -4,6 +4,7 @@ import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
 import { Ply_SoundManager, FxType } from '../Framework/Ply_SoundManager';
 import { Ply_Event } from '../Framework/Ply_Event';
+import { GameManager } from '../Systems/GameManager';
 
 const { ccclass, property } = _decorator;
 
@@ -83,6 +84,9 @@ export class Shower extends Item {
 
     @property({ type: ItemCleanManager, tooltip: 'ItemCleanManager quản lý tiến trình (sẽ tự động gọi ItemCleanDone khi hoàn thành)' })
     public itemCleanManager: ItemCleanManager | null = null;
+
+    @property({ tooltip: 'Gọi GameManager.StopGame khi hoàn thành step tắm thứ 2 (lần xả xà phòng thứ 2).' })
+    public stopGameAfterSecondStep: boolean = true;
 
     @property({ type: Ply_Event, tooltip: 'Sự kiện khi hoàn thành việc xịt sạch' })
     public onShowerComplete: Ply_Event = new Ply_Event();
@@ -390,6 +394,12 @@ export class Shower extends Item {
 
         // Tự động kết nối với ItemCleanManager
         (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
+
+        // Xả xà phòng lần 2 xong thì dừng game.
+        if (this.stopGameAfterSecondStep && this._currentCleanStep === 1) {
+            GameManager.Ins?.StopGame();
+            GameManager.Ins?.GotoStore();
+        }
     }
 
     private startWaterParticles(): void {
