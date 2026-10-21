@@ -163,6 +163,7 @@ export class ItemSetupTool extends Component {
         holderUT.setContentSize(itemUT.contentSize);
         holderUT.setAnchorPoint(itemUT.anchorPoint);
 
+        const id = index + 1;
         const currentScale = itemNode.scale.clone();
         itemSnap.baseScale = currentScale.clone();
         itemSnap.id = id;
@@ -176,6 +177,7 @@ export class ItemSetupTool extends Component {
         const shadowNode = shadows.get(itemNode.name) || this.findShadowOnHolder(holderNode, itemNode.name);
         if (shadowNode) {
             shadowNode.setParent(holderNode);
+            shadowNode.layer = holderNode.layer;
             shadowNode.setPosition(Vec3.ZERO);
             shadowNode.active = false;
             itemSnap.shadowOnHolder = shadowNode;
@@ -228,7 +230,7 @@ export class ItemSetupTool extends Component {
         let createdCount = 0;
         for (const holder of this.holdersParent.children) {
             if (!holder.name.startsWith(this.holderPrefix)) continue;
-            const itemName = holder.name.substring(this.holderPrefix.Length ?? this.holderPrefix.length);
+            const itemName = holder.name.substring(this.holderPrefix.length);
             const itemSnap = itemsByName.get(itemName);
             if (!itemSnap) continue;
 
@@ -303,6 +305,7 @@ export class ItemSetupTool extends Component {
             let modelNode = itemNode.getChildByName('Model');
             if (!modelNode) {
                 modelNode = new Node('Model');
+                modelNode.layer = itemNode.layer;
                 modelNode.setParent(itemNode);
                 modelNode.setPosition(Vec3.ZERO);
                 modelNode.setRotationFromEuler(0, 0, 0);
@@ -344,6 +347,8 @@ export class ItemSetupTool extends Component {
             holderNode = new Node(holderName);
             holderNode.setParent(this.holdersParent);
         }
+        // Node mới mặc định layer DEFAULT, camera UI không vẽ: dùng layer của item.
+        holderNode.layer = itemNode.layer;
 
         holderNode.setWorldPosition(itemNode.worldPosition);
         holderNode.setWorldRotation(itemNode.worldRotation);
@@ -354,6 +359,7 @@ export class ItemSetupTool extends Component {
     private createShadowNode(holder: Node, itemName: string, itemSprite: Sprite | null): Node {
         const shadowName = itemName + this.shadowSuffix;
         const shadowNode = new Node(shadowName);
+        shadowNode.layer = holder.layer;
         shadowNode.setParent(holder);
         shadowNode.setPosition(Vec3.ZERO);
         shadowNode.setScale(Vec3.ONE);
@@ -396,6 +402,7 @@ export class ItemSetupTool extends Component {
         if (!existing) {
             existing = new Node(this.holdersParentName);
             existing.setParent(this.itemsParent?.parent || this.node);
+            existing.layer = existing.parent!.layer;
         }
         this.holdersParent = existing;
     }

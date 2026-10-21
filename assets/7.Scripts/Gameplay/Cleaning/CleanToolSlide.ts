@@ -36,6 +36,9 @@ export class CleanToolSlide extends Component {
     @property({ tooltip: 'Tự bay xuống và biến mất khi ItemCleanManager báo item này xong.' })
     public exitOnDone = true;
 
+    @property({ tooltip: 'Chờ tool bay xuống xong mới chuyển lượt. Tắt: lượt kế tiếp bắt đầu ngay trong lúc tool đang bay xuống.' })
+    public waitExitBeforeNext = true;
+
     @property({ type: [Node], tooltip: 'Các node bay lên cùng lúc với tool này (ví dụ shower kéo theo brush, towel, spray bottle).' })
     public appearTogether: Node[] = [];
 

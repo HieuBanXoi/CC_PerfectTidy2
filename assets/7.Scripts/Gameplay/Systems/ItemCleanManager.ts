@@ -180,7 +180,9 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
 
         // Tool có CleanToolSlide.exitOnDone: bay xuống xong mới chuyển lượt.
         const exitSlide = this.getExitSlide(this.currentItemIndex);
-        if (exitSlide) {
+        if (exitSlide && !exitSlide.waitExitBeforeNext) {
+            exitSlide.SlideOut();
+        } else if (exitSlide) {
             this.isTransitioning = true;
             HandTutManager.Ins?.ResetHandTutDelay();
             exitSlide.SlideOut(() => {

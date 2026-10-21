@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Sprite, Tween, tween, Vec3, Enum, Animation, animation, SkeletalAnimation, EventTouch, UITransform, Quat, v3, Collider2D, Contact2DType, IPhysics2DContact, PolygonCollider2D, BoxCollider2D, CCInteger, math } from 'cc';
+import { _decorator, Component, Node, Sprite, Tween, tween, Vec3, Enum, Animation, animation, SkeletalAnimation, EventTouch, UITransform, Quat, v3, Collider2D, Contact2DType, IPhysics2DContact, PolygonCollider2D, BoxCollider2D, CCInteger, math, UIOpacity } from 'cc';
 import { Ply_SoundManager, FxType } from '../../Framework/Ply_SoundManager';
 import { Ply_Event } from '../../Framework/Ply_Event';
 import { GameManager } from '../../Systems/GameManager';
@@ -256,12 +256,25 @@ export class ItemSnap extends Component {
         }
     }
 
+    /** Hiện bóng mờ tại chỗ đặt đúng của item (gợi ý) khi bắt đầu kéo. */
+    public ShowShadowHint(): void {
+        const shadow = this.shadowOnHolder;
+        if (!this.canShowShadowHint || !shadow || !shadow.isValid || shadow.active) return;
+
+        const opacity = shadow.getComponent(UIOpacity) ?? shadow.addComponent(UIOpacity);
+        Tween.stopAllByTarget(opacity);
+        opacity.opacity = 0;
+        shadow.active = true;
+        tween(opacity).to(this.dragScaleDuration, { opacity: 255 }).start();
+    }
+
     public StartDrag(touchWorldPos?: Vec3): void {
         if (!this.enabled || this.currentState !== ItemState.Waiting) return;
 
         Ply_SoundManager.Ins?.PlayFx(FxType.Click);
         this.StopIdleBobbing();
         Tween.stopAllByTarget(this.node);
+        this.ShowShadowHint();
 
         (GameManager.Ins as any)?.ResetInactivityTimer?.(this);
 

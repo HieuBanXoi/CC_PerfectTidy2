@@ -26,7 +26,9 @@ export enum FxType {
     SprayPuff,
     Tear,
     WetWipeRub,
-    
+    Aha,
+    PlaceItem,
+
 }
 Enum(FxType);
 

@@ -116,14 +116,14 @@ export class WebDuster extends CameraCleanTool {
         const spin = (Math.random() < 0.5 ? -1 : 1) * (20 + Math.random() * 20);
         tween(node)
             .to(this.fallDuration, { position: target, angle: state.restAngle + spin }, { easing: 'quadIn' })
-            .call(() => {
-                node.active = false;
-                if (this._states.every(s => s.fallen && !s.node.active)) this.Complete();
-            })
+            .call(() => { node.active = false; })
             .start();
         tween(opacity)
             .delay(this.fallDuration * 0.5)
             .to(this.fallDuration * 0.5, { opacity: 0 })
             .start();
+
+        // Web cuối vừa bắt đầu rơi là xong bước luôn, không chờ rơi hết.
+        if (this._states.every(s => s.fallen)) this.Complete();
     }
 }

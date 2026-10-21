@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Vec2, Vec3, Enum, Tween, tween, UITransform, math, director, Layers, UIOpacity } from 'cc';
+import { _decorator, Component, Node, Vec2, Vec3, Enum, Tween, tween, UITransform, math, director, Layers, UIOpacity, Rect } from 'cc';
 import { Ply_Singleton } from '../../Framework/Ply_Singleton';
 import { ItemSnap, ItemState } from './ItemSnap';
 import { GameManager } from '../../Systems/GameManager';
@@ -85,6 +85,18 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     @property({ type: [Node], tooltip: 'Các vùng hình chữ nhật cần loại trừ khi random vị trí spawn item' })
     public cantSpawnAreas: Node[] = [];
+
+    @property({ tooltip: 'Khi spawn nhiều item cùng lúc: rải thoáng ra, hạn chế item sát / đè lên nhau' })
+    public spreadRevealedItems: boolean = true;
+
+    @property({ min: 1, tooltip: 'Số vị trí random thử cho mỗi item khi rải thoáng (càng nhiều càng thoáng)' })
+    public spreadCandidateCount: number = 30;
+
+    @property({ tooltip: 'Đợt spawn đầu: không cho item nào rơi lên holder của item được hand tut gợi ý đầu tiên (tránh che mất chỗ đặt)' })
+    public keepFirstHandTutHolderClear: boolean = true;
+
+    @property({ min: 0, tooltip: 'Khoảng hở thêm (world) quanh holder đó mà item không được chạm vào' })
+    public firstHandTutHolderClearMargin: number = 0;
 
     @property({ min: 1, tooltip: 'Số lần thử tìm vị trí hợp lệ ngoài CantSpawnArea trước khi fallback' })
     public maxSpawnPositionAttempts: number = 40;
@@ -249,6 +261,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         let revealedCount = 0;
         let spawnedCount = 0;
 
+        const isFirstReveal = !this.hasShownInitialSpawnHandTut;
+        const spawnedItems: ItemSnap[] = [];
+
         for (let i = 0; i < countToSpawn; i++) {
             const spawned = this.SpawnNextItem(() => {
                 revealedCount++;
@@ -262,8 +277,18 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
             if (spawned) {
                 spawnedCount++;
+                spawnedItems.push(spawned);
             }
         }
+
+        // Hand tut đầu gợi ý item nằm trên cùng = item spawn cuối của đợt này (BringToFront khi spawn).
+        const tutHolder = this.keepFirstHandTutHolderClear && isFirstReveal && spawnedItems.length > 0
+            ? spawnedItems[spawnedItems.length - 1].correctHolderTransform
+            : null;
+        if (this.spreadRevealedItems && spawnedItems.length > 1) {
+            this.spreadItems(spawnedItems, this.getClearRect(tutHolder));
+        }
+        if (tutHolder) this.clearItemsOffHolder(tutHolder, spawnedItems);
 
         if (spawnedCount <= 0 && !this.hasShownInitialSpawnHandTut) {
             this.scheduleSpawnHandTut(true);
@@ -271,6 +296,93 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         }
 
         (GameManager.Ins as any)?.TriggerTutorial?.();
+    }
+
+    /**
+     * Dời các item vừa spawn đang đè lên holder (kể cả item có holder đó) sang vị trí random khác,
+     * để chỗ đặt mà hand tut chỉ tới không bị che.
+     */
+    private clearItemsOffHolder(holder: Node | null, items: ItemSnap[]): void {
+        const rect = this.getClearRect(holder);
+        if (!rect) return;
+
+        const attempts = Math.max(1, Math.floor(this.maxSpawnPositionAttempts));
+        for (const item of items) {
+            let moved = false;
+            for (let i = 0; i < attempts && this.isItemOverlappingRect(item, rect); i++) {
+                item.node.setPosition(this.GetRandomLocalPositionInArea());
+                moved = true;
+            }
+            if (moved) item.waitingPosition = item.node.worldPosition.clone();
+        }
+    }
+
+    /** Khung world của holder nới rộng firstHandTutHolderClearMargin (null nếu không có holder hợp lệ). */
+    private getClearRect(holder: Node | null): Rect | null {
+        const holderUT = holder?.isValid && holder.activeInHierarchy ? holder.getComponent(UITransform) : null;
+        if (!holderUT) return null;
+
+        const rect = holderUT.getBoundingBoxToWorld();
+        const margin = this.firstHandTutHolderClearMargin;
+        rect.x -= margin;
+        rect.y -= margin;
+        rect.width += margin * 2;
+        rect.height += margin * 2;
+        return rect;
+    }
+
+    /**
+     * Rải thoáng các item vừa spawn: mỗi item thử spreadCandidateCount vị trí random trong vùng spawn,
+     * chọn vị trí có khoảng hở lớn nhất tới các item đã đặt trước (và tránh khung avoidRect nếu có).
+     */
+    private spreadItems(items: ItemSnap[], avoidRect: Rect | null): void {
+        const placed: { x: number; y: number; r: number }[] = [];
+        const candidates = Math.max(1, Math.floor(this.spreadCandidateCount));
+        const best = new Vec3();
+
+        for (const item of items) {
+            const radius = this.getItemWorldRadius(item, false);
+            let bestScore = Number.NEGATIVE_INFINITY;
+            for (let i = 0; i < candidates; i++) {
+                item.node.setPosition(this.GetRandomLocalPositionInArea());
+                const p = item.node.worldPosition;
+                let score = Number.POSITIVE_INFINITY;
+                for (const other of placed) {
+                    score = Math.min(score, Math.hypot(p.x - other.x, p.y - other.y) - radius - other.r);
+                }
+                if (avoidRect && this.isItemOverlappingRect(item, avoidRect)) score -= 100000;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best.set(item.node.position);
+                }
+            }
+            item.node.setPosition(best);
+            const p = item.node.worldPosition;
+            placed.push({ x: p.x, y: p.y, r: radius });
+            item.waitingPosition = p.clone();
+        }
+    }
+
+    /**
+     * Bán kính world của item ở scale chờ (item đang scale 0 vì vừa spawn). useMax = true: vòng bao cả item
+     * kể cả khi xoay (chặt); false: theo cạnh ngắn (cho phép các item nằm khít hơn khi rải).
+     */
+    private getItemWorldRadius(item: ItemSnap, useMax: boolean): number {
+        const ut = item.getComponent(UITransform);
+        if (!ut) return 0;
+        const parentScale = Math.abs(item.node.parent?.worldScale.x ?? 1);
+        const size = useMax ? Math.max(ut.width, ut.height) : (ut.width + ut.height) * 0.5;
+        return size * 0.5 * Math.abs(item.GetWaitingScale().x) * parentScale;
+    }
+
+    /** So theo vòng tròn cỡ trung bình của item ở scale chờ (chỉ né vừa đủ, không đẩy item ra quá xa). */
+    private isItemOverlappingRect(item: ItemSnap, rect: Rect): boolean {
+        const radius = this.getItemWorldRadius(item, false);
+        if (radius <= 0) return false;
+        const center = item.node.worldPosition;
+        const dx = center.x - math.clamp(center.x, rect.xMin, rect.xMax);
+        const dy = center.y - math.clamp(center.y, rect.yMin, rect.yMax);
+        return dx * dx + dy * dy < radius * radius;
     }
 
     /**
