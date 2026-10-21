@@ -18,6 +18,7 @@ CCEffect %{
       properties:
         alphaThreshold: { value: 0.5 }
         cleanMask: { value: white, editor: { tooltip: "Mask texture (kênh R: 0 = giữ nguyên, 1 = trong suốt)" } }
+        maskUVRect: { value: [0, 0, 1, 1], editor: { tooltip: "Khung UV của sprite trong texture (xy = góc trên trái, zw = kích thước). Dùng khi sprite nằm trong atlas." } }
 }%
 
 CCProgram sprite-vs %{
@@ -75,6 +76,9 @@ CCProgram sprite-fs %{
   #endif
 
   uniform sampler2D cleanMask;
+  uniform MaskData {
+    vec4 maskUVRect;
+  };
 
   vec4 frag () {
     vec4 o = vec4(1.0, 1.0, 1.0, 1.0);
@@ -87,7 +91,9 @@ CCProgram sprite-fs %{
       #endif
 
       // Đọc mask từ cleanMask (kênh Red): 0.0 = giữ nguyên alpha, 1.0 = xóa hoàn toàn (trong suốt)
-      float mask = texture(cleanMask, uv0).r;
+      // uv0 là UV trong texture (có thể là atlas): quy về UV 0..1 của riêng sprite để khớp mask.
+      vec2 maskUV = (uv0 - maskUVRect.xy) / maskUVRect.zw;
+      float mask = texture(cleanMask, maskUV).r;
       o.a *= (1.0 - mask);
     #endif
 

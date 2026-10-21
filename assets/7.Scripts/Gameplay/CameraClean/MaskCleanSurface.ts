@@ -1,4 +1,4 @@
-import { _decorator, Component, ImageAsset, Node, Sprite, SpriteFrame, Texture2D, UITransform, Vec3, clamp01 } from 'cc';
+import { _decorator, Component, ImageAsset, Material, Node, Sprite, SpriteFrame, Texture2D, UITransform, Vec3, Vec4, clamp01 } from 'cc';
 import { readImagePixels } from '../Matching/ReadImagePixel';
 import { CleanRegion, CleanRegionShape } from './CleanRegion';
 
@@ -54,6 +54,8 @@ export class MaskCleanSurface extends Component {
     private _regionOf: Int16Array = new Int16Array(0);
     private _cap: Uint8Array = new Uint8Array(0);
     private _texture: Texture2D | null = null;
+    private _material: Material | null = null;
+    private readonly _maskUVRect = new Vec4(-1, -1, -1, -1);
     private _dirty = false;
     private _initialized = false;
     private _analyzed = false;
@@ -68,6 +70,7 @@ export class MaskCleanSurface extends Component {
     }
 
     protected lateUpdate(): void {
+        this.syncMaskUVRect();
         if (!this._dirty || !this._texture) return;
         this._texture.uploadData(this._buffer);
         this._dirty = false;
@@ -243,6 +246,26 @@ export class MaskCleanSurface extends Component {
 
     // ---------------- Internals ----------------
 
+    /**
+     * Sprite nhỏ có thể bị gộp vào atlas (dynamic atlas lúc chạy) nên UV của shader là UV trong atlas.
+     * Truyền khung UV của sprite cho shader (maskUVRect) để mask vẫn khớp đúng chỗ lau.
+     */
+    private syncMaskUVRect(): void {
+        const uv = this.targetSprite?.spriteFrame?.uv;
+        if (!this._material || !uv || uv.length < 8) return;
+        let minU = uv[0], maxU = uv[0], minV = uv[1], maxV = uv[1];
+        for (let i = 2; i < 8; i += 2) {
+            minU = Math.min(minU, uv[i]);
+            maxU = Math.max(maxU, uv[i]);
+            minV = Math.min(minV, uv[i + 1]);
+            maxV = Math.max(maxV, uv[i + 1]);
+        }
+        const rect = this._maskUVRect;
+        if (rect.x === minU && rect.y === minV && rect.z === maxU - minU && rect.w === maxV - minV) return;
+        rect.set(minU, minV, Math.max(0.000001, maxU - minU), Math.max(0.000001, maxV - minV));
+        this._material.setProperty('maskUVRect', rect);
+    }
+
     private getTransform(): UITransform | null {
         return (this.targetSprite ?? this.getComponent(Sprite))?.getComponent(UITransform) ?? this.getComponent(UITransform);
     }
@@ -317,8 +340,12 @@ export class MaskCleanSurface extends Component {
 
     private buildValidMask(): void {
         const frame = this.targetSprite?.spriteFrame ?? null;
-        const pixels = frame ? this.readPixels(frame) : null;
-        const texture = frame?.texture as Texture2D | undefined;
+        // Sprite đã bị gộp vào dynamic atlas: đọc alpha từ texture gốc (rect gốc nằm ở original._x/_y).
+        const original = frame?.original as { _texture: Texture2D; _x: number; _y: number } | null | undefined;
+        const texture = (original?._texture ?? frame?.texture) as Texture2D | undefined;
+        const pixels = texture ? this.readPixels(texture) : null;
+        const rectX = original ? original._x : frame?.rect.x ?? 0;
+        const rectY = original ? original._y : frame?.rect.y ?? 0;
         for (let y = 0; y < this._h; y++) {
             for (let x = 0; x < this._w; x++) {
                 const index = y * this._w + x;
@@ -330,20 +357,20 @@ export class MaskCleanSurface extends Component {
                 const vTop = (y + 0.5) / this._h;
                 const rect = frame.rect;
                 const px = frame.rotated
-                    ? Math.floor(rect.x + vTop * rect.height)
-                    : Math.floor(rect.x + u * rect.width);
+                    ? Math.floor(rectX + vTop * rect.height)
+                    : Math.floor(rectX + u * rect.width);
                 const py = frame.rotated
-                    ? Math.floor(rect.y + (1 - u) * rect.width)
-                    : Math.floor(rect.y + vTop * rect.height);
+                    ? Math.floor(rectY + (1 - u) * rect.width)
+                    : Math.floor(rectY + vTop * rect.height);
                 const alpha = pixels[(py * texture.width + px) * 4 + 3] ?? 0;
                 this._valid[index] = alpha >= this.alphaThreshold ? 1 : 0;
             }
         }
     }
 
-    private readPixels(frame: SpriteFrame): Uint8ClampedArray | null {
+    private readPixels(texture: Texture2D): Uint8ClampedArray | null {
         try {
-            const image = (frame.texture as Texture2D)?.image;
+            const image = texture.image;
             return image ? readImagePixels(image) : null;
         } catch (error) {
             console.warn(`[MaskCleanSurface] Không đọc được alpha của "${this.node.name}", tính toàn bộ hình chữ nhật.`, error);
@@ -374,9 +401,11 @@ export class MaskCleanSurface extends Component {
         });
         this._texture = new Texture2D();
         this._texture.image = image;
-        const material = this.targetSprite?.getMaterialInstance(0);
+        const material = this.targetSprite?.getMaterialInstance(0) ?? null;
+        this._material = material;
         if (material) {
             material.setProperty('cleanMask', this._texture);
+            this.syncMaskUVRect();
         } else {
             console.warn(`[MaskCleanSurface] "${this.node.name}" chưa có customMaterial (CleanMat).`);
         }
