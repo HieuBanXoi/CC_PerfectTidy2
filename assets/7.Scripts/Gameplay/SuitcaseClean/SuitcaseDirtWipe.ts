@@ -17,6 +17,9 @@ export class SuitcaseDirtWipe extends CameraCleanTool {
     @property({ type: [MaskCleanSurface], tooltip: 'Các vết slime: mờ dần khi lau. Sprite cần customMaterial = CleanMat.' })
     public slimes: MaskCleanSurface[] = [];
 
+    @property({ type: [Node], tooltip: 'Vùng không lau được (CantCleanArea): cọ nằm trong vùng thì không tính là lau. Thêm CleanRegion (towelCleanRatio = 0) vào vùng và gán regionRoot của MaskCleanSurface để mép cọ cũng không lau lấn vào.' })
+    public cantCleanAreas: Node[] = [];
+
     @property({ min: 1, tooltip: 'Bán kính lau (world).' })
     public wipeRadius = 90;
 
@@ -41,6 +44,7 @@ export class SuitcaseDirtWipe extends CameraCleanTool {
     }
 
     protected onToolDrag(): boolean {
+        if (this.isInCantCleanArea()) return false;
         let acting = false;
         for (const surface of this.surfaces) {
             if (this.wipe(surface, this.wipeStrength)) acting = true;
@@ -50,6 +54,10 @@ export class SuitcaseDirtWipe extends CameraCleanTool {
         }
         if (this.isAllDone()) this.Complete();
         return acting;
+    }
+
+    private isInCantCleanArea(): boolean {
+        return this.cantCleanAreas.some(area => this.isPointInside(this._point, area));
     }
 
     /** Lau 1 lớp; trả về true nếu cọ đang nằm trên lớp đó. */

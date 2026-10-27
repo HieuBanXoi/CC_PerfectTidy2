@@ -214,7 +214,7 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         if (this.hasCompletedSequence) return;
 
         let nextIndex = this.currentItemIndex + 1;
-        while (nextIndex < this.items.length && !this.getItemAt(nextIndex)) {
+        while (nextIndex < this.items.length && (!this.getItemAt(nextIndex) || this.shouldSkipStep(nextIndex))) {
             nextIndex++;
         }
 
@@ -254,6 +254,12 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
                 GameManager.Ins?.StopGame();
             }
         }
+    }
+
+    /** Item đã tự xong trước lượt của nó (ví dụ rác bỏ vào thùng không theo thứ tự) thì bỏ qua slot. */
+    private shouldSkipStep(index: number): boolean {
+        const item = this.getItemAt(index) as unknown as { ShouldSkipCleanStep?: () => boolean } | null;
+        return !!item?.ShouldSkipCleanStep?.();
     }
 
     /** Cập nhật lượt: tất cả items đều có thể drag được, riêng onProcess được bật theo lượt cho item hiện tại */

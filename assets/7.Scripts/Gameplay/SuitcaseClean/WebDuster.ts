@@ -1,5 +1,6 @@
-import { _decorator, Node, Tween, tween, UIOpacity, Vec3 } from 'cc';
+import { _decorator, Enum, Node, Tween, tween, UIOpacity, Vec3 } from 'cc';
 import { CameraCleanTool } from '../CameraClean/CameraCleanTool';
+import { FxType, Ply_SoundManager } from '../Framework/Ply_SoundManager';
 
 const { ccclass, property } = _decorator;
 
@@ -34,6 +35,12 @@ export class WebDuster extends CameraCleanTool {
     @property({ tooltip: 'Chổi phải ra khỏi vùng này (web nới rộng thêm exitPadding, world) mới tính là đã ra ngoài hẳn.' })
     public exitPadding = 20;
 
+    @property({ tooltip: 'Phát sound 1 lần mỗi khi lau trúng web (thay cho loop sound khi đang quét).' })
+    public playHitSound = true;
+
+    @property({ type: Enum(FxType), tooltip: 'Sound mỗi lần lau trúng web.' })
+    public hitFxType: FxType = FxType.Clean1;
+
     @property({ min: 0, tooltip: 'Góc rung (độ) mỗi lần lau trúng.' })
     public shakeAngle = 8;
 
@@ -50,6 +57,8 @@ export class WebDuster extends CameraCleanTool {
 
     protected onLoad(): void {
         super.onLoad();
+        // Sound phát theo từng lần lau trúng, không loop khi đang quét.
+        if (this.playHitSound) this.playLoopSound = false;
         this._states = this.webs.filter(web => !!web).map(web => new WebState(web));
     }
 
@@ -86,6 +95,7 @@ export class WebDuster extends CameraCleanTool {
 
     private hit(state: WebState): void {
         state.hits++;
+        if (this.playHitSound) Ply_SoundManager.Ins?.PlayFx(this.hitFxType);
         if (state.hits >= this.hitsToFall) {
             this.fall(state);
         } else {

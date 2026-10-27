@@ -4,6 +4,7 @@ import { Item } from '../Components/Item';
 import { ItemCleanManager } from '../../Systems/ItemCleanManager';
 import { World } from '../../../Core/Managers/World';
 import { PoolType } from '../../../Core/Pooling/PoolMember';
+import { CleanToolSlide } from '../../Cleaning/CleanToolSlide';
 
 const { ccclass, property } = _decorator;
 
@@ -22,6 +23,12 @@ export class TrashBin extends Item {
     @property({ min: 0, tooltip: 'Scale multiplier for the smoke cloud spawned when trash is added.' })
     public smokeScale = 1;
 
+    @property({ tooltip: 'Call ItemCleanManager.ItemCleanDone() when full. Turn off when each trash is its own clean step (DeskTrash).' })
+    public advanceCleanManagerWhenFull = true;
+
+    @property({ tooltip: 'When full, slide out with the CleanToolSlide on this node (if any).' })
+    public slideOutWhenFull = false;
+
     @property({ readonly: true, tooltip: 'Trash currently added to this bin.' })
     public trashCount = 0;
 
@@ -36,6 +43,9 @@ export class TrashBin extends Item {
         if (this.trashCount < Math.max(1, this.requiredTrashCount)) return;
 
         this.isFull = true;
+        if (this.slideOutWhenFull) this.getComponent(CleanToolSlide)?.SlideOut();
+        if (!this.advanceCleanManagerWhenFull) return;
+
         const manager = this.itemCleanManager ?? (ItemCleanManager.Ins as ItemCleanManager | null);
         if (!manager) {
             console.warn(`[TrashBin] Assign ItemCleanManager on "${this.node.name}".`);

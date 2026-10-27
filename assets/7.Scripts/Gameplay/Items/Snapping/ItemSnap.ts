@@ -256,10 +256,10 @@ export class ItemSnap extends Component {
         }
     }
 
-    /** Hiện bóng mờ tại chỗ đặt đúng của item (gợi ý) khi bắt đầu kéo. */
+    /** Hiện bóng mờ tại chỗ đặt đúng của item (gợi ý) khi bắt đầu kéo. Chưa đặt đủ requiredItems thì không hiện. */
     public ShowShadowHint(): void {
         const shadow = this.shadowOnHolder;
-        if (!this.canShowShadowHint || !shadow || !shadow.isValid || shadow.active) return;
+        if (!this.canShowShadowHint || !shadow || !shadow.isValid || shadow.active || !this.CanPlaced()) return;
 
         const opacity = shadow.getComponent(UIOpacity) ?? shadow.addComponent(UIOpacity);
         Tween.stopAllByTarget(opacity);
@@ -297,8 +297,8 @@ export class ItemSnap extends Component {
 
         this.ChangeState(ItemState.OnDrag);
 
-        // Scale nhân trực tiếp theo baseScale
-        const targetScale = this.baseScale.clone().multiplyScalar(this.dragScaleMultiplier);
+        // Scale nhân theo baseScale (baseScale tính trong parent gốc; draggingNode có thể khác scale, ví dụ Main bị scale)
+        const targetScale = this.ToCurrentParentScale(this.originalParent, this.baseScale.clone().multiplyScalar(this.dragScaleMultiplier));
         tween(this.node)
             .to(this.dragScaleDuration, { scale: targetScale }, { easing: 'backOut' })
             .start();
@@ -414,9 +414,10 @@ export class ItemSnap extends Component {
         const targetPos = (holder.attachSlot ? holder.attachSlot.worldPosition : holder.node.worldPosition).clone();
         const targetEuler = (holder.attachSlot ? holder.attachSlot.eulerAngles : holder.node.eulerAngles).clone();
 
-        // Tween scale về baseScale
+        // Tween về đúng scale sau khi gắn vào targetParent (scale ONE trong targetParent), quy đổi về parent hiện tại
+        // để không bị giật kích thước lúc đổi parent (ví dụ Main bị scale).
         tween(this.node)
-            .to(this.snapDuration, { scale: this.baseScale }, { easing: 'backOut' })
+            .to(this.snapDuration, { scale: this.ToCurrentParentScale(targetParent, Vec3.ONE) }, { easing: 'backOut' })
             .start();
 
         tween(this.node)
@@ -510,6 +511,20 @@ export class ItemSnap extends Component {
             this.StartIdleBobbing();
             this.onPlacedFail.invoke();
         }
+    }
+
+    /** Đổi một local scale tính trong refParent sang local scale tương đương trong parent hiện tại của item. */
+    private ToCurrentParentScale(refParent: Node | null, localScaleInRef: Vec3): Vec3 {
+        const parent = this.node.parent;
+        if (!refParent || !refParent.isValid || !parent || parent === refParent) return localScaleInRef.clone();
+        const ref = refParent.worldScale;
+        const cur = parent.worldScale;
+        const safe = (v: number) => Math.abs(v) < 0.0001 ? 1 : v;
+        return new Vec3(
+            localScaleInRef.x * ref.x / safe(cur.x),
+            localScaleInRef.y * ref.y / safe(cur.y),
+            localScaleInRef.z * ref.z / safe(cur.z),
+        );
     }
 
     public RestoreOriginalParent(): void {

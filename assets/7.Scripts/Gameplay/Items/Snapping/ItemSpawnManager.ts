@@ -89,8 +89,8 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     @property({ tooltip: 'Khi spawn nhiều item cùng lúc: rải thoáng ra, hạn chế item sát / đè lên nhau' })
     public spreadRevealedItems: boolean = true;
 
-    @property({ min: 1, tooltip: 'Số vị trí random thử cho mỗi item khi rải thoáng (càng nhiều càng thoáng)' })
-    public spreadCandidateCount: number = 30;
+    @property({ min: 5, tooltip: 'Bước lưới (world) khi tìm chỗ rải item: nhỏ = rải mịn hơn nhưng tính lâu hơn' })
+    public spreadGridStep: number = 30;
 
     @property({ tooltip: 'Đợt spawn đầu: không cho item nào rơi lên holder của item được hand tut gợi ý đầu tiên (tránh che mất chỗ đặt)' })
     public keepFirstHandTutHolderClear: boolean = true;
@@ -100,6 +100,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     @property({ min: 1, tooltip: 'Số lần thử tìm vị trí hợp lệ ngoài CantSpawnArea trước khi fallback' })
     public maxSpawnPositionAttempts: number = 40;
+
+    @property({ tooltip: 'Hiện bóng mờ (shadowOnHolder) tại chỗ đặt đúng khi kéo item. Tắt: không item nào hiện bóng khi kéo' })
+    public showShadowOnDrag: boolean = true;
 
     @property({ tooltip: 'Bật hiệu ứng nhấp nhô lơ lửng cho item khi ở trạng thái chờ trong vùng' })
     public enableIdleBobbing: boolean = true;
@@ -119,6 +122,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     @property({ min: 0, tooltip: 'Thời gian dừng giữa các vòng lặp hand tutorial' })
     public handTutWaitAtEndDuration: number = 0.2;
 
+    @property({ min: 0, tooltip: 'Thời gian hand mờ dần khi tới đích trước khi lặp lại (giây)' })
+    public handTutFadeOutDuration: number = 0.3;
+
     // ==================== WIN & STORE REDIRECT LOGIC ====================
 
     @property({
@@ -131,6 +137,12 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         tooltip: 'Tự động gọi GameManager.StopGame và GameManager.GotoStore khi đạt đủ số lượng drop trúng'
     })
     public autoStopAndGoToStoreOnLimit: boolean = true;
+
+    @property({
+        tooltip: 'Bật: StopGame rồi GotoStore luôn. Tắt: chỉ StopGame (chạm màn hình tiếp theo mới mở store)',
+        visible(this: ItemSpawnManager) { return this.autoStopAndGoToStoreOnLimit; }
+    })
+    public goToStoreOnLimit: boolean = true;
 
     @property({
         min: 0,
@@ -193,6 +205,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
             const item = this.dynamicItems[i];
             if (item && item.node) {
                 item.node.active = false;
+                if (!this.showShadowOnDrag) item.canShowShadowHint = false;
             }
         }
     }
@@ -331,36 +344,103 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         return rect;
     }
 
-    /**
-     * Rải thoáng các item vừa spawn: mỗi item thử spreadCandidateCount vị trí random trong vùng spawn,
-     * chọn vị trí có khoảng hở lớn nhất tới các item đã đặt trước (và tránh khung avoidRect nếu có).
-     */
+    /** Rải đều các item vừa spawn (đã có góc xoay) trong vùng spawn, hạn chế đè nhau. */
     private spreadItems(items: ItemSnap[], avoidRect: Rect | null): void {
-        const placed: { x: number; y: number; r: number }[] = [];
-        const candidates = Math.max(1, Math.floor(this.spreadCandidateCount));
-        const best = new Vec3();
+        const targets = this.PlanSpreadWorldPositions(items, avoidRect);
+        items.forEach((item, i) => {
+            item.node.setWorldPosition(targets[i]);
+            item.waitingPosition = targets[i].clone();
+        });
+    }
 
-        for (const item of items) {
-            const radius = this.getItemWorldRadius(item, false);
-            let bestScore = Number.NEGATIVE_INFINITY;
-            for (let i = 0; i < candidates; i++) {
-                item.node.setPosition(this.GetRandomLocalPositionInArea());
-                const p = item.node.worldPosition;
-                let score = Number.POSITIVE_INFINITY;
-                for (const other of placed) {
-                    score = Math.min(score, Math.hypot(p.x - other.x, p.y - other.y) - radius - other.r);
-                }
-                if (avoidRect && this.isItemOverlappingRect(item, avoidRect)) score -= 100000;
-                if (score > bestScore) {
-                    bestScore = score;
-                    best.set(item.node.position);
+    /**
+     * Tính vị trí world rải đều trong vùng spawn, hạn chế item đè lên nhau (theo kích thước ở scale chờ
+     * và góc xoay hiện tại của từng item). Xếp item to trước: mỗi item thử lưới vị trí phủ cả vùng,
+     * chọn chỗ ít diện tích đè nhất (lên item đã xếp, avoidRect, CantSpawnArea); cùng mức đè thì chọn chỗ
+     * cách xa các item khác nhất. Trả về vị trí theo đúng thứ tự items.
+     */
+    public PlanSpreadWorldPositions(items: ItemSnap[], avoidRect: Rect | null = null): Vec3[] {
+        const area = this.spawnAreaNode || this.node;
+        const areaUT = area.getComponent(UITransform) || area.addComponent(UITransform);
+        const bounds = areaUT.getBoundingBoxToWorld();
+        const padX = this.spawnAreaPadding.x * Math.abs(area.worldScale.x);
+        const padY = this.spawnAreaPadding.y * Math.abs(area.worldScale.y);
+        const minX = bounds.xMin + padX, maxX = bounds.xMax - padX;
+        const minY = bounds.yMin + padY, maxY = bounds.yMax - padY;
+        const container = this.itemsContainer || this.spawnAreaNode || this.node;
+        const parentScale = container.worldScale;
+        const step = Math.max(5, this.spreadGridStep);
+        const blocks = this.cantSpawnAreas
+            .filter(node => node?.isValid && node.activeInHierarchy && node.getComponent(UITransform))
+            .map(node => node.getComponent(UITransform)!.getBoundingBoxToWorld());
+
+        // Khung bao (AABB world) của từng item khi đã xoay, tính quanh tâm hình (không phải anchor).
+        const plans = items.map((item, index) => {
+            const ut = item.getComponent(UITransform);
+            const scale = item.GetWaitingScale();
+            const sx = Math.abs(scale.x * parentScale.x), sy = Math.abs(scale.y * parentScale.y);
+            const w = (ut?.width ?? 0) * sx, h = (ut?.height ?? 0) * sy;
+            const rad = item.node.angle * Math.PI / 180;
+            const cos = Math.cos(rad), sin = Math.sin(rad);
+            const lx = ut ? (0.5 - ut.anchorX) * w : 0, ly = ut ? (0.5 - ut.anchorY) * h : 0;
+            return {
+                index,
+                hx: (Math.abs(cos) * w + Math.abs(sin) * h) * 0.5,
+                hy: (Math.abs(sin) * w + Math.abs(cos) * h) * 0.5,
+                ox: lx * cos - ly * sin,
+                oy: lx * sin + ly * cos,
+            };
+        }).sort((a, b) => b.hx * b.hy - a.hx * a.hy);
+
+        const overlap = (cx: number, cy: number, hx: number, hy: number, xMin: number, yMin: number, xMax: number, yMax: number) =>
+            Math.max(0, Math.min(cx + hx, xMax) - Math.max(cx - hx, xMin))
+            * Math.max(0, Math.min(cy + hy, yMax) - Math.max(cy - hy, yMin));
+
+        const placed: { cx: number; cy: number; hx: number; hy: number }[] = [];
+        const result: Vec3[] = items.map(item => item.node.worldPosition.clone());
+        const point = new Vec2();
+        for (const plan of plans) {
+            const { hx, hy } = plan;
+            // Giữ cả item nằm trong vùng; item to hơn vùng thì đặt giữa.
+            const x0 = Math.min(minX + hx, (minX + maxX) * 0.5), x1 = Math.max(maxX - hx, x0);
+            const y0 = Math.min(minY + hy, (minY + maxY) * 0.5), y1 = Math.max(maxY - hy, y0);
+            const nx = Math.max(1, Math.ceil((x1 - x0) / step)), ny = Math.max(1, Math.ceil((y1 - y0) / step));
+
+            let bestX = (x0 + x1) * 0.5, bestY = (y0 + y1) * 0.5;
+            let bestCost = Number.POSITIVE_INFINITY, bestGap = Number.NEGATIVE_INFINITY;
+            for (let gy = 0; gy <= ny; gy++) {
+                for (let gx = 0; gx <= nx; gx++) {
+                    // Lệch ngẫu nhiên trong ô lưới để các item không thẳng hàng.
+                    const cx = math.clamp(x0 + (x1 - x0) * gx / nx + math.randomRange(-0.35, 0.35) * step, x0, x1);
+                    const cy = math.clamp(y0 + (y1 - y0) * gy / ny + math.randomRange(-0.35, 0.35) * step, y0, y1);
+
+                    let cost = 0;
+                    let gap = Number.POSITIVE_INFINITY;
+                    for (const o of placed) {
+                        cost += overlap(cx, cy, hx, hy, o.cx - o.hx, o.cy - o.hy, o.cx + o.hx, o.cy + o.hy);
+                        gap = Math.min(gap, Math.max(Math.abs(cx - o.cx) - hx - o.hx, Math.abs(cy - o.cy) - hy - o.hy));
+                    }
+                    if (avoidRect) cost += overlap(cx, cy, hx, hy, avoidRect.xMin, avoidRect.yMin, avoidRect.xMax, avoidRect.yMax) * 4;
+                    point.set(cx, cy);
+                    for (const block of blocks) {
+                        if (block.contains(point)) cost += 1e9;
+                    }
+                    // Chưa có item nào thì gap = 0 ở mọi chỗ: chọn ngẫu nhiên.
+                    const gapScore = (Number.isFinite(gap) ? gap : 0) + Math.random() * step * 0.5;
+
+                    if (cost < bestCost - 1 || (cost <= bestCost + 1 && gapScore > bestGap)) {
+                        bestCost = cost;
+                        bestGap = gapScore;
+                        bestX = cx;
+                        bestY = cy;
+                    }
                 }
             }
-            item.node.setPosition(best);
-            const p = item.node.worldPosition;
-            placed.push({ x: p.x, y: p.y, r: radius });
-            item.waitingPosition = p.clone();
+
+            placed.push({ cx: bestX, cy: bestY, hx, hy });
+            result[plan.index] = new Vec3(bestX - plan.ox, bestY - plan.oy, 0);
         }
+        return result;
     }
 
     /**
@@ -466,7 +546,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         flyDuration: number = 0.55,
         jumpHeight: number = 120,
         onComplete?: (spawnedItem: ItemSnap) => void,
-        shouldScheduleHandTut: boolean = false
+        shouldScheduleHandTut: boolean = false,
+        targetWorldPos: Vec3 | null = null,
+        keepCurrentRotation: boolean = false
     ): ItemSnap | null {
         if (this.isReachedLimit || this.currentItemIndex >= this.dynamicItems.length) {
             return null;
@@ -497,11 +579,13 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         // 1. Tính toán toạ độ xuất phát (vị trí Box) theo Local của targetContainer
         const startLocalPos = containerUT.convertToNodeSpaceAR(sourceWorldPos);
 
-        // 2. Tính toán toạ độ đích ngẫu nhiên trong vùng spawnArea
-        const areaRandomLocal = this.GetRandomLocalPositionInArea();
-        const areaNode = this.spawnAreaNode || this.node;
-        const areaUT = areaNode.getComponent(UITransform) || areaNode.addComponent(UITransform);
-        const worldTarget = areaUT.convertToWorldSpaceAR(areaRandomLocal);
+        // 2. Toạ độ đích: vị trí đã tính trước (rải đều) hoặc ngẫu nhiên trong vùng spawnArea
+        let worldTarget = targetWorldPos;
+        if (!worldTarget) {
+            const areaNode = this.spawnAreaNode || this.node;
+            const areaUT = areaNode.getComponent(UITransform) || areaNode.addComponent(UITransform);
+            worldTarget = areaUT.convertToWorldSpaceAR(this.GetRandomLocalPositionInArea());
+        }
         const targetLocalPos = containerUT.convertToNodeSpaceAR(worldTarget);
 
         item.homeSlot = null;
@@ -514,7 +598,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
         // Áp dụng góc xoay ngẫu nhiên NGAY TỪ LÚC XUẤT PHÁT và giữ nguyên suốt quá trình bay
         item.isSpawnInitialized = true;
-        item.ApplyRandomSpawnRotation();
+        if (!keepCurrentRotation) item.ApplyRandomSpawnRotation();
 
         const targetScale = item.GetWaitingScale();
         item.BringToFront();
@@ -570,6 +654,54 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     }
 
     /**
+     * Spawn count item kế tiếp từ toạ độ hộp, bay ra các vị trí rải đều trong vùng spawn (hạn chế đè nhau).
+     * stagger: độ trễ giữa 2 item. Trả về số item sẽ spawn; onAllLanded gọi khi tất cả đã đáp xuống.
+     */
+    public SpawnBatchFromSource(
+        sourceWorldPos: Vec3,
+        count: number,
+        flyDuration: number = 0.55,
+        jumpHeight: number = 120,
+        stagger: number = 0,
+        onAllLanded?: () => void
+    ): number {
+        if (this.isReachedLimit) return 0;
+        const batch = this.dynamicItems.slice(this.currentItemIndex, this.currentItemIndex + Math.max(0, count));
+        const total = batch.length;
+        if (total <= 0) return 0;
+
+        // Chốt góc xoay trước để tính chỗ chiếm theo đúng góc lúc item đáp xuống.
+        const valid = batch.filter(item => !!item?.node);
+        valid.forEach(item => {
+            item.isSpawnInitialized = true;
+            item.ApplyRandomSpawnRotation();
+        });
+        // Item spawn cuối nằm trên cùng, là item hand tut gợi ý đầu tiên: không che chỗ đặt của nó.
+        const tutHolder = this.keepFirstHandTutHolderClear && !this.hasShownInitialSpawnHandTut && valid.length > 0
+            ? valid[valid.length - 1].correctHolderTransform
+            : null;
+        const positions = this.PlanSpreadWorldPositions(valid, this.getClearRect(tutHolder));
+        const targets = new Map<ItemSnap, Vec3>();
+        valid.forEach((item, i) => targets.set(item, positions[i]));
+
+        let landed = 0;
+        const onLanded = () => {
+            if (++landed >= total) onAllLanded?.();
+        };
+        for (let i = 0; i < total; i++) {
+            this.scheduleOnce(() => {
+                const next = this.dynamicItems[this.currentItemIndex];
+                const target = next ? targets.get(next) ?? null : null;
+                const spawned = this.SpawnNextItemFromSource(sourceWorldPos, i, total, flyDuration, jumpHeight,
+                    onLanded, false, target, !!target);
+                // Item null / đã đạt giới hạn vẫn tính là xong để không kẹt.
+                if (!spawned) onLanded();
+            }, i * stagger);
+        }
+        return total;
+    }
+
+    /**
      * Kích hoạt Hand Tutorial ngay lập tức không có thời gian chờ (delay = 0).
      */
     public TriggerImmediateHandTut(): void {
@@ -621,9 +753,9 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
         this.scheduleOnce(() => {
             if (this.autoStopAndGoToStoreOnLimit && GameManager.Ins) {
-                console.log('🎉 [ItemSpawnManager] Đạt mốc hoàn thành! Gọi StopGame & GotoStore...');
+                console.log(`🎉 [ItemSpawnManager] Đạt mốc hoàn thành! Gọi StopGame${this.goToStoreOnLimit ? ' & GotoStore' : ''}...`);
                 GameManager.Ins.StopGame();
-                GameManager.Ins.GotoStore();
+                if (this.goToStoreOnLimit) GameManager.Ins.GotoStore();
             }
         }, this.storeRedirectDelay);
     }
@@ -838,9 +970,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
             tween(handNode)
                 .to(this.handTutMoveDuration, { worldPosition: endPos }, { easing: 'sineInOut' })
-                .call(() => this.setHandTutAlpha(0))
-                .delay(this.handTutWaitAtEndDuration)
-                .call(loop)
+                .call(() => this.fadeOutHandTut(token, loop))
                 .start();
         };
 
@@ -883,9 +1013,27 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
             && !this.isReachedLimit;
     }
 
+    /** Hand tới đích thì mờ dần, chờ handTutWaitAtEndDuration rồi mới lặp lại. */
+    private fadeOutHandTut(token: number, loop: () => void): void {
+        if (token !== this.handTutToken || !this.handTutNode) return;
+        const opacity = this.handTutOpacity?.isValid ? this.handTutOpacity : this.handTutNode.getComponent(UIOpacity);
+        if (!opacity || this.handTutFadeOutDuration <= 0) {
+            this.setHandTutAlpha(0);
+            this.scheduleOnce(loop, this.handTutWaitAtEndDuration);
+            return;
+        }
+        tween(opacity)
+            .to(this.handTutFadeOutDuration, { opacity: 0 }, { easing: 'sineIn' })
+            .delay(this.handTutWaitAtEndDuration)
+            .call(loop)
+            .start();
+    }
+
     private hideSpawnHandTut(): void {
         if (!this.handTutNode || !this.handTutNode.isValid) return;
         Tween.stopAllByTarget(this.handTutNode);
+        const opacity = this.handTutNode.getComponent(UIOpacity);
+        if (opacity) Tween.stopAllByTarget(opacity);
         this.handTutNode.active = false;
         this.setHandTutAlpha(this.handTutDefaultAlpha);
     }

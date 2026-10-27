@@ -40,7 +40,7 @@ export class FxAudio {
     @property({ type: AudioClip })
     public audioClip: AudioClip = null!;
 
-    @property({ range: [0, 1, 0.05], slide: true })
+    @property({ range: [0, 3, 0.05], slide: true, tooltip: '> 1: phát chồng nhiều lớp cùng lúc để to hơn (AudioSource chỉ cho tối đa 1).' })
     public volume: number = 1.0;
     public eventHandler: EventHandler | null = null;
 }
@@ -55,6 +55,8 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
     public bgmSource: AudioSource = null!;
 
     private sourcesMap: Map<FxType, AudioSource> = new Map();
+    /** AudioSource phụ cho loop có volume > 1. */
+    private boostSourcesMap: Map<FxType, AudioSource[]> = new Map();
     /** Các FxType đang phát loop (tự theo dõi, không dùng AudioSource.playing). */
     private loopingTypes: Set<FxType> = new Set();
     private isMuted: boolean = false;
@@ -85,13 +87,13 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
         if (!fxAudio || !fxAudio.audioClip) return;
 
         const source = this.GetOrCreateFxSource(type);
-        if (source.loop) {
-            source.loop = false;
-            source.stop();
-            this.loopingTypes.delete(type);
-        }
+        if (source.loop) this.StopFxLoop(type);
 
-        source.playOneShot(fxAudio.audioClip, fxAudio.volume);
+        // Volume > 1: phát chồng nhiều lớp, mỗi lớp <= 1.
+        const layers = Math.max(1, Math.ceil(fxAudio.volume));
+        for (let i = 0; i < layers; i++) {
+            source.playOneShot(fxAudio.audioClip, fxAudio.volume / layers);
+        }
     }
 
     /**
@@ -140,11 +142,16 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
         // sau stop(), làm lần phát loop thứ 2 bị bỏ qua (mất sfx khi kéo đồ lần 2).
         if (this.loopingTypes.has(type)) return;
 
-        source.clip = fxAudio.audioClip;
-        source.volume = fxAudio.volume;
-        source.loop = true;
-        source.stop();
-        source.play();
+        // Volume > 1: thêm các AudioSource phụ loop cùng clip, mỗi lớp <= 1.
+        const layers = Math.max(1, Math.ceil(fxAudio.volume));
+        const sources = [source, ...this.GetBoostSources(type, layers - 1)];
+        for (const layer of sources) {
+            layer.clip = fxAudio.audioClip;
+            layer.volume = fxAudio.volume / layers;
+            layer.loop = true;
+            layer.stop();
+            layer.play();
+        }
         this.loopingTypes.add(type);
     }
 
@@ -155,9 +162,10 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
         const type = fxType as FxType;
         this.loopingTypes.delete(type);
         const source = this.sourcesMap.get(type);
-        if (source) {
-            source.loop = false;
-            source.stop();
+        for (const layer of [source, ...(this.boostSourcesMap.get(type) ?? [])]) {
+            if (!layer) continue;
+            layer.loop = false;
+            layer.stop();
         }
     }
 
@@ -174,6 +182,11 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
                 source.stop();
             }
         });
+        this.boostSourcesMap.forEach((sources) => sources.forEach((source) => {
+            if (source && source.node && source.node.isValid) {
+                source.stop();
+            }
+        }));
         this.loopingTypes.clear();
     }
 
@@ -210,5 +223,17 @@ export class Ply_SoundManager extends Ply_Singleton<Ply_SoundManager> {
         }
 
         return source;
+    }
+
+    /** Lấy (hoặc tạo thêm) count AudioSource phụ của FxType để loop chồng lớp. */
+    private GetBoostSources(fxType: FxType, count: number): AudioSource[] {
+        const sources = (this.boostSourcesMap.get(fxType) ?? []).filter(s => s && s.node && s.node.isValid);
+        while (sources.length < count) {
+            const node = new Node(`Audio_${FxType[fxType] ?? fxType}_Boost${sources.length + 1}`);
+            node.setParent(this.node);
+            sources.push(node.addComponent(AudioSource));
+        }
+        this.boostSourcesMap.set(fxType, sources);
+        return sources.slice(0, count);
     }
 }
