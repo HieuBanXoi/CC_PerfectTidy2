@@ -114,6 +114,11 @@ export class ItemCleanManager extends Ply_Singleton<ItemCleanManager> {
         }
     }
 
+    /** Đã xong toàn bộ chuỗi (danh sách rỗng cũng tính là xong ngay khi start). */
+    public get IsCompleted(): boolean {
+        return this.hasCompletedSequence;
+    }
+
     /** Khởi động lượt thực hiện từ item đầu tiên */
     public StartItems(): void {
         this.bindNonCurrentDropFeedback();

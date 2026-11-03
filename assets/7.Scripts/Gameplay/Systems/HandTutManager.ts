@@ -97,12 +97,11 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         super.onLoad();
         if (this.handNode) {
             Vec3.copy(this.handDefaultScale, this.handNode.scale);
+            this.handSprite ??= this.handNode.getComponentInChildren(Sprite);
             if (this.handSprite) {
-                this.handSprite = this.handNode.getComponentInChildren(Sprite);
-                
-            }
-            this.handDefaultColor = this.handSprite.color.clone();
+                this.handDefaultColor = this.handSprite.color.clone();
                 this.handDefaultAlpha = this.handDefaultColor.a;
+            }
             this.handNode.active = false;
         }
 

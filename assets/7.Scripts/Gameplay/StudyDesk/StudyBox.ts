@@ -2,6 +2,7 @@ import { _decorator, Component, Enum, Node, Tween, tween, UIOpacity, Vec3 } from
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
 import { ItemSpawnManager } from '../Items/Snapping/ItemSpawnManager';
 import { HandTutManager } from '../Systems/HandTutManager';
+import { HandHintPlayer } from '../Systems/HandHintPlayer';
 import { GameManager } from '../Systems/GameManager';
 import { FxType, Ply_SoundManager } from '../Framework/Ply_SoundManager';
 import { Ply_Event } from '../Framework/Ply_Event';
@@ -12,17 +13,32 @@ import { TutorialPopup } from './TutorialPopup';
 
 const { ccclass, property } = _decorator;
 
+export enum BoxAppearTrigger {
+    /** Có ItemCleanManager còn bước dọn: đợi dọn xong. Không có / không có bước nào: xuất hiện ngay khi vào game. */
+    Auto = 0,
+    /** Luôn xuất hiện ngay khi vào game. */
+    OnStart = 1,
+    /** Chỉ xuất hiện khi gọi Appear() (từ code hoặc Ply_Event). */
+    Manual = 2,
+}
+Enum(BoxAppearTrigger);
+
 /**
- * Hộp đồ sau bước lau bàn:
- * 1. ItemCleanManager xong hết (nhặt rác + lau bàn) -> hộp phi từ dưới lên.
- * 2. Hộp rung rung chờ người chơi bấm.
- * 3. Bấm: hộp nhún, nảy lên, đổi sang sprite mở, toàn bộ item nhảy ra; hộp thu nhỏ rồi biến mất.
- * 4. Item đáp xuống hết thì bật popup Tutorial; thu Tutorial vào icon rồi mới hiện tay gợi ý kéo item.
- * Đặt component trên node luôn active (ví dụ Manager), node hộp có thể để inactive trên scene.
+ * Hộp đồ:
+ * 1. Xuất hiện (theo appearTrigger): phi từ dưới lên, rung rung chờ bấm; lâu không bấm thì hiện tay gợi ý.
+ * 2. Bấm lần đầu: nhún, nảy, đổi sang sprite mở, ra firstClickSpawnCount item (0 = hết).
+ * 3. Các lần bấm sau: nhún nhẹ, ra nextClickSpawnCount item. Hết item thì hộp thu nhỏ biến mất.
+ * 4. Đợt đầu đáp xong thì bật popup Tutorial (nếu có); thu popup vào icon rồi mới hiện tay gợi ý kéo item.
+ *
+ * Độc lập: ItemCleanManager / TutorialPopup đều tuỳ chọn. Item do ItemSpawnManager spawn (không có thì hộp chỉ mở rồi ẩn).
+ * Đặt component trên node luôn active (ví dụ Manager); node hộp có thể để inactive trên scene.
  */
 @ccclass('StudyBox')
 export class StudyBox extends Component {
-    @property({ type: Node, tooltip: 'Node hộp (Box). Để inactive trên scene, xuất hiện sau khi lau bàn xong.' })
+
+    // ==================== NODES ====================
+
+    @property({ type: Node, tooltip: 'Node hộp (Box). Ẩn lúc đầu, xuất hiện theo appearTrigger.' })
     public box: Node | null = null;
 
     @property({ type: Node, tooltip: 'Sprite hộp đóng (Sealed_cardboard_box).' })
@@ -34,16 +50,26 @@ export class StudyBox extends Component {
     @property({ type: Node, tooltip: 'Điểm item nhảy ra. Để trống: node hộp.' })
     public spawnPoint: Node | null = null;
 
-    @property({ type: ItemCleanManager, tooltip: 'Để trống: ItemCleanManager.Ins.' })
+    // ==================== LIÊN KẾT HỆ THỐNG (tuỳ chọn) ====================
+
+    @property({ type: Enum(BoxAppearTrigger), tooltip: 'Khi nào hộp xuất hiện.' })
+    public appearTrigger: BoxAppearTrigger = BoxAppearTrigger.Auto;
+
+    @property({ type: ItemCleanManager, tooltip: 'Dùng với appearTrigger = Auto. Để trống: ItemCleanManager.Ins (không có cũng được).' })
     public itemCleanManager: ItemCleanManager | null = null;
 
-    @property({ type: ItemSpawnManager, tooltip: 'Để trống: ItemSpawnManager.Ins.' })
+    @property({ type: ItemSpawnManager, tooltip: 'Nguồn item. Để trống: ItemSpawnManager.Ins.' })
     public spawnManager: ItemSpawnManager | null = null;
 
-    @property({ type: TutorialPopup, tooltip: 'Popup Tutorial bật lên sau khi toàn bộ item trong hộp đã bay ra và đáp xuống. Để trống: không có popup.' })
+    @property({ type: TutorialPopup, tooltip: 'Popup Tutorial bật lên sau khi đợt item đầu đáp xuống. Để trống: không có popup.' })
     public tutorialPopup: TutorialPopup | null = null;
 
-    @property({ min: 0, tooltip: 'Chờ (giây) sau khi lau xong rồi hộp mới phi lên.' })
+    @property({ min: 0, tooltip: 'Chờ (giây) sau khi item đáp xuống hết rồi mới bật popup Tutorial.' })
+    public tutorialDelay = 0.2;
+
+    // ==================== XUẤT HIỆN ====================
+
+    @property({ min: 0, tooltip: 'Chờ (giây) trước khi hộp phi lên.' })
     public appearDelay = 0.2;
 
     @property({ tooltip: 'Quãng đường hộp phi từ dưới lên (local).' })
@@ -51,9 +77,6 @@ export class StudyBox extends Component {
 
     @property({ min: 0.01, tooltip: 'Thời gian hộp phi lên (giây).' })
     public flyDuration = 0.5;
-
-    @property({ min: 0, tooltip: 'Chờ (giây) sau khi item đáp xuống hết rồi mới bật popup Tutorial.' })
-    public tutorialDelay = 0.2;
 
     @property({ type: Enum(FxType), tooltip: 'Sound khi hộp phi lên.' })
     public appearFxType: FxType = FxType.CleanItemAppear;
@@ -67,7 +90,9 @@ export class StudyBox extends Component {
     @property({ min: 0, tooltip: 'Nghỉ (giây) giữa 2 lần rung.' })
     public shakeInterval = 0.8;
 
-    @property({ tooltip: 'Độ cao hộp nảy lên khi bấm (local).' })
+    // ==================== BẤM HỘP ====================
+
+    @property({ tooltip: 'Độ cao hộp nảy lên khi bấm mở (local).' })
     public bounceHeight = 60;
 
     @property({ type: Enum(FxType), tooltip: 'Sound khi bấm hộp.' })
@@ -79,6 +104,14 @@ export class StudyBox extends Component {
     @property({ tooltip: 'Bắn hiệu ứng sao khi hộp mở.' })
     public playOpenVfx = true;
 
+    // ==================== ITEM BAY RA ====================
+
+    @property({ min: 0, tooltip: 'Số item nhảy ra ở lần bấm đầu tiên (mở hộp). 0 = ra hết.' })
+    public firstClickSpawnCount = 0;
+
+    @property({ min: 1, tooltip: 'Số item nhảy ra ở mỗi lần bấm tiếp theo (hộp còn item thì vẫn ở lại cho bấm tiếp).' })
+    public nextClickSpawnCount = 1;
+
     @property({ min: 0.01, tooltip: 'Thời gian mỗi item bay ra (giây).' })
     public itemFlyDuration = 0.55;
 
@@ -88,8 +121,10 @@ export class StudyBox extends Component {
     @property({ min: 0, tooltip: 'Độ trễ (giây) giữa 2 item nhảy ra liên tiếp.' })
     public itemStagger = 0.02;
 
-    @property({ min: 0, tooltip: 'Chờ (giây) sau khi item cuối nhảy ra rồi hộp mới biến mất.' })
+    @property({ min: 0, tooltip: 'Chờ (giây) sau khi item cuối cùng trong hộp nhảy ra rồi hộp mới biến mất.' })
     public hideDelay = 0.25;
+
+    // ==================== TAY GỢI Ý BẤM HỘP ====================
 
     @property({ min: 0, tooltip: 'Sau bao lâu (giây) không bấm thì hiện tay gợi ý bấm hộp. 0 = không gợi ý.' })
     public handHintDelay = 3;
@@ -97,49 +132,77 @@ export class StudyBox extends Component {
     @property({ type: Node, tooltip: 'Node tay gợi ý. Để trống: HandTutManager.Ins.handNode.' })
     public handNode: Node | null = null;
 
-    @property({ type: Ply_Event, tooltip: 'Gọi khi bấm mở hộp.' })
+    // ==================== EVENTS ====================
+
+    @property({ type: Ply_Event, tooltip: 'Gọi khi bấm mở hộp (lần đầu).' })
     public onOpened: Ply_Event = new Ply_Event();
 
-    @property({ type: Ply_Event, tooltip: 'Gọi khi toàn bộ item đã nhảy ra và đáp xuống.' })
+    @property({ type: Ply_Event, tooltip: 'Gọi mỗi lần đợt item vừa bấm ra đã đáp xuống hết.' })
     public onAllItemsLanded: Ply_Event = new Ply_Event();
 
+    @property({ type: Ply_Event, tooltip: 'Gọi khi hộp hết item và bắt đầu biến mất.' })
+    public onEmptied: Ply_Event = new Ply_Event();
+
+    // ==================== STATE ====================
+
     private _appeared = false;
-    private _ready = false;
-    private _opened = false;
+    private _ready = false;      // Hộp đã đáp, đang chờ bấm
+    private _opened = false;     // Đã bấm mở lần đầu
+    private _spawning = false;   // Đợt item đang bay, chặn bấm dồn
     private readonly _restPos = new Vec3();
     private readonly _restScale = new Vec3(1, 1, 1);
     private _restAngle = 0;
-    private _handBaseScale: Vec3 | null = null;
     private readonly _onAllCleaned = () => this.Appear();
+
+    public get IsOpened(): boolean { return this._opened; }
 
     public resetInEditor(): void {
         if (!this.onOpened) this.onOpened = new Ply_Event();
         if (!this.onAllItemsLanded) this.onAllItemsLanded = new Ply_Event();
+        if (!this.onEmptied) this.onEmptied = new Ply_Event();
     }
+
+    // ==================== LIFECYCLE ====================
 
     protected onLoad(): void {
         const box = this.box;
-        if (!box) return;
+        if (!box) {
+            console.warn('[StudyBox] Chưa gán node box.');
+            return;
+        }
         this._restPos.set(box.position);
         this._restScale.set(box.scale);
         this._restAngle = box.angle;
         box.active = false;
-        if (this.closedNode) this.closedNode.active = true;
-        if (this.openNode) this.openNode.active = false;
+        this.setLidOpen(false);
     }
 
     protected start(): void {
-        // Bind ở start: ItemCleanManager.Ins đã được gán trong onLoad của nó.
-        this.Manager?.onAllItemsCleaned.addListener(this._onAllCleaned);
         this.box?.on(Node.EventType.TOUCH_END, this.onBoxClick, this);
+        // Bind ở start: ItemCleanManager.Ins đã được gán trong onLoad của nó.
+        if (this.shouldWaitForClean()) {
+            this.CleanManager!.onAllItemsCleaned.addListener(this._onAllCleaned);
+        } else if (this.appearTrigger !== BoxAppearTrigger.Manual) {
+            this.Appear();
+        }
     }
 
     protected onDestroy(): void {
-        this.Manager?.onAllItemsCleaned.removeListener(this._onAllCleaned);
+        this.CleanManager?.onAllItemsCleaned.removeListener(this._onAllCleaned);
         if (this.box?.isValid) this.box.off(Node.EventType.TOUCH_END, this.onBoxClick, this);
+        this.hideHandHint();
     }
 
-    /** Hộp phi từ dưới lên vị trí đặt trên scene. */
+    /** Auto + có ItemCleanManager còn bước dọn chưa xong -> đợi onAllItemsCleaned. */
+    private shouldWaitForClean(): boolean {
+        if (this.appearTrigger !== BoxAppearTrigger.Auto) return false;
+        const clean = this.CleanManager;
+        return !!clean && !clean.IsCompleted && clean.items.some(item => !!item);
+    }
+
+    // ==================== XUẤT HIỆN ====================
+
+    /** Hộp phi từ dưới lên vị trí đặt trên scene, rồi rung chờ bấm. */
     public Appear(): void {
         const box = this.box;
         if (!box || this._appeared) return;
@@ -157,7 +220,7 @@ export class StudyBox extends Component {
             tween(box)
                 .to(this.flyDuration, { position: rest, angle: this._restAngle }, { easing: 'backOut' })
                 // Đáp xuống: bẹp nhẹ rồi nảy về scale gốc.
-                .to(0.1, { scale: new Vec3(s.x * 1.12, s.y * 0.88, s.z) }, { easing: 'quadOut' })
+                .to(0.1, { scale: this.scaled(1.12, 0.88) }, { easing: 'quadOut' })
                 .to(0.2, { scale: s }, { easing: 'backOut' })
                 .call(() => this.onLanded())
                 .start();
@@ -170,81 +233,121 @@ export class StudyBox extends Component {
         this.scheduleHandHint();
     }
 
+    // ==================== BẤM HỘP ====================
+
     private onBoxClick(): void {
-        if (!this._ready || this._opened) return;
+        if (!this._ready || this._spawning) return;
         if (GameManager.Ins && !GameManager.Ins.IsPlaying()) return;
-        this.Open();
+        if (!this._opened) this.Open();
+        else this.SpawnMore();
     }
 
-    /** Bấm hộp: nhún, nảy lên, đổi sprite mở, item nhảy ra rồi hộp biến mất. */
+    /** Bấm lần đầu: nhún, nảy lên, đổi sprite mở, ra đợt item đầu. */
     public Open(): void {
         const box = this.box;
         if (!box || this._opened) return;
         this._opened = true;
+        this._spawning = true;
         this.stopShake();
         this.hideHandHint();
-        Ply_SoundManager.Ins?.PlayFx(this.clickFxType);
-        (GameManager.Ins as any)?.ResetInactivityTimer?.(null);
+        this.playClickFeedback();
         this.onOpened.invoke();
 
         const rest = this._restPos;
-        const s = this._restScale;
-        const at = (sx: number, sy: number) => new Vec3(s.x * sx, s.y * sy, s.z);
         Tween.stopAllByTarget(box);
         box.setPosition(rest);
         box.angle = this._restAngle;
         tween(box)
-            .to(0.14, { scale: at(1.2, 0.78) }, { easing: 'quadOut' })
-            .to(0.18, { scale: at(0.88, 1.2), position: new Vec3(rest.x, rest.y + this.bounceHeight, rest.z) }, { easing: 'quadOut' })
+            .to(0.14, { scale: this.scaled(1.2, 0.78) }, { easing: 'quadOut' })
+            .to(0.18, { scale: this.scaled(0.88, 1.2), position: new Vec3(rest.x, rest.y + this.bounceHeight, rest.z) }, { easing: 'quadOut' })
             .call(() => this.openLid())
-            .to(0.16, { scale: s, position: rest }, { easing: 'quadIn' })
-            .to(0.08, { scale: at(1.1, 0.9) }, { easing: 'quadOut' })
-            .to(0.14, { scale: s }, { easing: 'backOut' })
+            .to(0.16, { scale: this._restScale, position: rest }, { easing: 'quadIn' })
+            .to(0.08, { scale: this.scaled(1.1, 0.9) }, { easing: 'quadOut' })
+            .to(0.14, { scale: this._restScale }, { easing: 'backOut' })
+            .start();
+    }
+
+    /** Các lần bấm sau khi đã mở: nhún nhẹ rồi ra thêm nextClickSpawnCount item. */
+    public SpawnMore(): void {
+        const box = this.box;
+        if (!box || !this._opened || this._spawning) return;
+        this._spawning = true;
+        this.playClickFeedback();
+
+        Tween.stopAllByTarget(box);
+        box.setPosition(this._restPos);
+        box.setScale(this._restScale);
+        tween(box)
+            .to(0.1, { scale: this.scaled(1.15, 0.85) }, { easing: 'quadOut' })
+            .call(() => this.spawnItems(this.nextClickSpawnCount, false))
+            .to(0.18, { scale: this._restScale }, { easing: 'backOut' })
             .start();
     }
 
     private openLid(): void {
-        if (this.closedNode) this.closedNode.active = false;
-        if (this.openNode) this.openNode.active = true;
+        this.setLidOpen(true);
         Ply_SoundManager.Ins?.PlayFx(this.openFxType);
         this.spawnOpenVfx();
-        this.spawnItems();
+        this.spawnItems(this.firstClickSpawnCount, true);
     }
 
-    private spawnItems(): void {
-        const manager = this.spawnManager ?? ItemSpawnManager.Ins as ItemSpawnManager | null;
-        const count = manager?.GetRemainingItemCount() ?? 0;
-        if (!manager || count <= 0) {
+    private playClickFeedback(): void {
+        Ply_SoundManager.Ins?.PlayFx(this.clickFxType);
+        GameManager.Ins?.ResetInactivityTimer(null);
+    }
+
+    // ==================== ITEM BAY RA ====================
+
+    /** Ra requested item (<= 0: ra hết). Hết item trong hộp thì hộp biến mất, còn thì ở lại cho bấm tiếp. */
+    private spawnItems(requested: number, isFirst: boolean): void {
+        const spawner = this.Spawner;
+        const remaining = spawner?.GetRemainingItemCount() ?? 0;
+        if (!spawner || remaining <= 0) {
+            if (!spawner) console.warn('[StudyBox] Không có ItemSpawnManager để spawn item.');
+            this._spawning = false;
             this.hideBox(0);
             return;
         }
 
+        const count = requested > 0 ? Math.min(requested, remaining) : remaining;
         const from = (this.spawnPoint ?? this.box!).worldPosition.clone();
         // Item bay ra các vị trí rải đều trong vùng spawn, hạn chế đè nhau.
-        manager.SpawnBatchFromSource(from, count, this.itemFlyDuration, this.itemJumpHeight, this.itemStagger,
-            () => this.onItemsLanded(manager));
-        this.hideBox(count * this.itemStagger + this.hideDelay);
+        spawner.SpawnBatchFromSource(from, count, this.itemFlyDuration, this.itemJumpHeight, this.itemStagger,
+            () => this.onItemsLanded(spawner, isFirst));
+        if (count >= remaining) this.hideBox(count * this.itemStagger + this.hideDelay);
     }
 
-    private onItemsLanded(manager: ItemSpawnManager): void {
+    private onItemsLanded(spawner: ItemSpawnManager, isFirst: boolean): void {
+        this._spawning = false;
         this.onAllItemsLanded.invoke();
+
+        // Tay gợi ý kéo item chỉ hiện sau khi người chơi thu Tutorial (đợt đầu) vào icon.
         const popup = this.tutorialPopup;
-        if (!popup || popup.HasShown) {
-            manager.TriggerImmediateHandTut();
+        if (!isFirst || !popup || popup.HasShown) {
+            spawner.TriggerImmediateHandTut();
             return;
         }
-        // Tay gợi ý kéo item chỉ hiện sau khi người chơi thu Tutorial vào icon.
         const onMinimized = () => {
             popup.onMinimized.removeListener(onMinimized);
-            manager.TriggerImmediateHandTut();
+            spawner.TriggerImmediateHandTut();
         };
         popup.onMinimized.addListener(onMinimized);
         this.scheduleOnce(() => popup.Show(), this.tutorialDelay);
     }
 
+    // ==================== HỘP ====================
+
+    private setLidOpen(open: boolean): void {
+        if (this.closedNode) this.closedNode.active = !open;
+        if (this.openNode) this.openNode.active = open;
+    }
+
     private hideBox(delay: number): void {
         const box = this.box;
         if (!box) return;
+        this._ready = false;
+        this.onEmptied.invoke();
+
         const opacity = box.getComponent(UIOpacity) ?? box.addComponent(UIOpacity);
         tween(box)
             .delay(delay)
@@ -292,7 +395,12 @@ export class StudyBox extends Component {
         effect.PlaySpawn();
     }
 
-    // ---------------- Tay gợi ý bấm hộp ----------------
+    private scaled(sx: number, sy: number): Vec3 {
+        const s = this._restScale;
+        return new Vec3(s.x * sx, s.y * sy, s.z);
+    }
+
+    // ==================== TAY GỢI Ý BẤM HỘP ====================
 
     private scheduleHandHint(): void {
         if (this.handHintDelay <= 0) return;
@@ -301,39 +409,30 @@ export class StudyBox extends Component {
     }
 
     private showHandHint = (): void => {
-        const hand = this.Hand;
+        const player = this.HandPlayer;
         const box = this.box;
-        if (!hand || !box || this._opened) return;
-        Tween.stopAllByTarget(hand);
-        hand.active = true;
-        if (hand.parent) hand.setSiblingIndex(hand.parent.children.length - 1);
-        hand.setWorldPosition(box.worldPosition);
-        this._handBaseScale ??= hand.scale.clone();
-        const base = this._handBaseScale;
-        hand.setScale(base);
-        tween(hand)
-            .to(0.3, { scale: new Vec3(base.x * 0.8, base.y * 0.8, base.z) }, { easing: 'sineOut' })
-            .to(0.3, { scale: base }, { easing: 'sineIn' })
-            .delay(0.3)
-            .union()
-            .repeatForever()
-            .start();
+        if (!player || !box || this._opened) return;
+        // Đồng bộ với HandTutManager: tắt gợi ý của nó (nếu đang hiện) trước khi dùng tay.
+        HandTutManager.Ins?.ResetHandTutDelay();
+        player.PlayTap(this, box, { pressScale: 0.8, pressDuration: 0.3, waitDuration: 0.3 }, () => !this._opened);
     };
 
     private hideHandHint(): void {
         this.unschedule(this.showHandHint);
-        const hand = this.Hand;
-        if (!hand?.active) return;
-        Tween.stopAllByTarget(hand);
-        if (this._handBaseScale) hand.setScale(this._handBaseScale);
-        hand.active = false;
+        this.HandPlayer?.Stop(this);
     }
 
-    private get Hand(): Node | null {
-        return this.handNode ?? HandTutManager.Ins?.handNode ?? null;
+    // ==================== REFS ====================
+
+    private get HandPlayer(): HandHintPlayer | null {
+        return HandHintPlayer.For(this.handNode ?? HandTutManager.Ins?.handNode);
     }
 
-    private get Manager(): ItemCleanManager | null {
+    private get CleanManager(): ItemCleanManager | null {
         return this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null;
+    }
+
+    private get Spawner(): ItemSpawnManager | null {
+        return this.spawnManager ?? ItemSpawnManager.Ins as ItemSpawnManager | null;
     }
 }

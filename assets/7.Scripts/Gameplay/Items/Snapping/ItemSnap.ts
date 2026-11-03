@@ -8,6 +8,7 @@ import { PoolType } from '../../../Core/Pooling/PoolMember';
 import { ItemHolder } from './ItemHolder';
 import { BlinkEffect } from '../../Effects/BlinkEffect';
 import { MergeEffect } from '../../Effects/MergeEffect';
+import { CabinetDoor } from '../Interactables/CabinetDoor';
 
 const { ccclass, property } = _decorator;
 
@@ -19,8 +20,22 @@ export enum ItemState {
 }
 Enum(ItemState);
 
+/** Callback khi 1 item bắt đầu snap vào holder đúng (trước tween snap). vacatedWorldPos: chỗ item vừa rời đi. */
+export type ItemPlaceListener = (item: ItemSnap, vacatedWorldPos: Vec3) => void;
+
 @ccclass('ItemSnap')
 export class ItemSnap extends Component {
+    private static readonly _placeListeners: ItemPlaceListener[] = [];
+
+    /** Đăng ký nghe mọi ItemSnap đặt đúng (ItemSpawnManager dùng để đếm & spawn tiếp). Không có ai nghe vẫn chạy bình thường. */
+    public static AddPlaceListener(listener: ItemPlaceListener): void {
+        if (!ItemSnap._placeListeners.includes(listener)) ItemSnap._placeListeners.push(listener);
+    }
+
+    public static RemovePlaceListener(listener: ItemPlaceListener): void {
+        const index = ItemSnap._placeListeners.indexOf(listener);
+        if (index >= 0) ItemSnap._placeListeners.splice(index, 1);
+    }
 
     @property({ type: Enum(FxType), tooltip: 'Sound effect played when successfully placed' })
     public fxTypeOnPlace: FxType = FxType.Complete;
@@ -402,12 +417,9 @@ export class ItemSnap extends Component {
         (GameManager.Ins as any)?.OnItemPlaced?.(this);
         this.PlaySoundOnPlace();
 
-        // Notify ItemSpawnManager to spawn next item
-        const vacatedPos = this.homeSlot ? this.homeSlot.worldPosition : this.waitingPosition;
-        const spawnMgr = (this.node.scene?.getComponentInChildren('ItemSpawnManager' as any) as any);
-        if (spawnMgr && typeof spawnMgr.SpawnNextItemToVacatedTarget === 'function') {
-            spawnMgr.SpawnNextItemToVacatedTarget(vacatedPos);
-        }
+        // Báo các hệ thống đang nghe (ItemSpawnManager đếm số món đặt đúng / spawn tiếp)
+        const vacatedPos = (this.homeSlot ? this.homeSlot.worldPosition : this.waitingPosition).clone();
+        for (const listener of [...ItemSnap._placeListeners]) listener(this, vacatedPos);
         this.homeSlot = null;
 
         const targetParent = holder.attachSlot || holder.node;
@@ -506,6 +518,20 @@ export class ItemSnap extends Component {
                 })
                 .start();
         } else {
+            // Thả đè lên cánh tủ đang đóng: đẩy item ra phía trên cánh (Cover che mất item).
+            const pushOut = CabinetDoor.GetPushOutPosition(this.node.worldPosition);
+            if (pushOut) {
+                tween(this.node)
+                    .to(this.missReturnDuration, { worldPosition: pushOut }, { easing: 'cubicOut' })
+                    .call(() => {
+                        this.waitingPosition = this.node.worldPosition.clone();
+                        this.StartIdleBobbing();
+                        this.onPlacedFail.invoke();
+                    })
+                    .start();
+                return;
+            }
+
             // Drop in place: Cập nhật toạ độ chờ và nhấp nhô
             this.waitingPosition = this.node.worldPosition.clone();
             this.StartIdleBobbing();
@@ -540,6 +566,8 @@ export class ItemSnap extends Component {
     }
 
     public CanPlaced(): boolean {
+        // Holder nằm sau cánh tủ đang đóng thì không snap được.
+        if (CabinetDoor.IsHolderBlocked(this.correctHolderTransform)) return false;
         if (!this.requiredItems || this.requiredItems.length === 0) return true;
 
         for (let i = 0; i < this.requiredItems.length; i++) {
