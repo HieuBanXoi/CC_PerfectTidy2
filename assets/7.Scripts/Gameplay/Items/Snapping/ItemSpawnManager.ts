@@ -4,6 +4,7 @@ import { Ply_Event } from '../../Framework/Ply_Event';
 import { GameManager } from '../../Systems/GameManager';
 import { HandTutManager } from '../../Systems/HandTutManager';
 import { HandHintPlayer } from '../../Systems/HandHintPlayer';
+import { HandHintRequest, HandHintSource, IdleHandHint } from '../../Systems/IdleHandHint';
 import { ItemSnap, ItemState } from './ItemSnap';
 import { SpawnAreaPlanner } from './SpawnAreaPlanner';
 
@@ -22,10 +23,11 @@ Enum(AreaSpawnMode);
  * Độc lập:
  * - Không cần ItemCleanManager. Ai muốn spawn (StudyBox, SuitcaseOpenTransition, ItemBox...) gọi API Spawn*.
  * - ItemSnap không phụ thuộc manager: manager tự nghe ItemSnap.AddPlaceListener.
- * - Tay gợi ý chạy trên HandHintPlayer (dùng chung node tay với HandTutManager / StudyBox, không giành nhau).
+ * - Tay gợi ý: scene có IdleHandHint thì manager chỉ là 1 nguồn gợi ý (kéo item về chỗ đúng), IdleHandHint lo
+ *   thời điểm hiện. Không có IdleHandHint thì tự hiện theo handTutDelay trên HandHintPlayer (node tay dùng chung).
  */
 @ccclass('ItemSpawnManager')
-export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
+export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> implements HandHintSource {
 
     // ==================== ITEMS ====================
 
@@ -104,13 +106,13 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     // ==================== HAND HINT ====================
 
-    @property({ tooltip: 'Bật tay gợi ý kéo item về chỗ đúng sau khi spawn / khi người chơi thả trượt' })
+    @property({ tooltip: 'Bật tay gợi ý kéo item về chỗ đúng (có IdleHandHint: hiện khi người chơi không tương tác; không có: sau khi spawn / thả trượt)' })
     public enableSpawnHandTut: boolean = true;
 
     @property({ type: Node, tooltip: 'Node tay. Để trống: dùng HandTutManager.Ins.handNode' })
     public handTutNode: Node | null = null;
 
-    @property({ min: 0, tooltip: 'Delay trước khi hiện tay gợi ý (giây), tính từ lần spawn / thả trượt gần nhất' })
+    @property({ min: 0, tooltip: 'Không có IdleHandHint: delay trước khi hiện tay gợi ý (giây), tính từ lần spawn / thả trượt gần nhất' })
     public handTutDelay: number = 7;
 
     @property({ min: 0.01, tooltip: 'Thời gian tay di chuyển từ item tới holder' })
@@ -153,6 +155,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     private hasShownInitialSpawnHandTut: boolean = false;
     private initialHandTutRetryCount: number = 0;
     private readonly handTutBoundItems = new Set<ItemSnap>();
+    private readonly appearingItems = new Set<ItemSnap>();   // Item đang bay ra / đang scale lên: chưa gợi ý tay
     private readonly onAnyItemPlaced = () => this.SpawnNextItemToVacatedTarget();
 
     public get PlacedItemCount(): number { return this.placedItemCount; }
@@ -180,6 +183,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     protected onEnable(): void {
         ItemSnap.AddPlaceListener(this.onAnyItemPlaced);
+        IdleHandHint.Register(this, ItemSpawnManager.HINT_PRIORITY);
     }
 
     protected start(): void {
@@ -188,6 +192,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     protected onDisable(): void {
         ItemSnap.RemovePlaceListener(this.onAnyItemPlaced);
+        IdleHandHint.Unregister(this);
         this.cancelSpawnHandTut();
     }
 
@@ -486,6 +491,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
         itemNode.setScale(Vec3.ZERO);
         item.DisableAnimatorOnSpawn();
         item.isSpawnInitialized = true;
+        this.appearingItems.add(item);
         this.bindItemHandTutEvents(item);
         return container;
     }
@@ -498,6 +504,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
     }
 
     private onItemSpawned(item: ItemSnap, shouldScheduleHandTut: boolean, onComplete?: (item: ItemSnap) => void): void {
+        this.appearingItems.delete(item);
         if (this.enableIdleBobbing) item.StartIdleBobbing();
         if (shouldScheduleHandTut) this.scheduleSpawnHandTut();
         onComplete?.(item);
@@ -519,7 +526,23 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     // ==================== HAND HINT ====================
 
-    /** Hiện tay gợi ý ngay (không delay). */
+    /** Thứ tự ưu tiên trong IdleHandHint: kéo item đặt được luôn gợi ý trước (cánh tủ, hộp sau). */
+    public static readonly HINT_PRIORITY = 0;
+
+    /** HandHintSource: kéo item đang chờ, đặt được ngay, nằm trên cùng về chỗ đúng. */
+    public GetHandHint(): HandHintRequest | null {
+        if (!this.enableSpawnHandTut || this.isReachedLimit) return null;
+        const item = this.getTopPriorityWaitingItem();
+        if (!item) return null;
+        return {
+            kind: 'move',
+            getStart: () => item.node.worldPosition,
+            getEnd: () => (item.correctHolderTransform?.activeInHierarchy ? item.correctHolderTransform : item.node).worldPosition,
+            canContinue: () => this.canContinueHandTut(item) && item.CanPlaced(),
+        };
+    }
+
+    /** Item vừa xuất hiện: không có IdleHandHint thì hiện tay ngay; có thì IdleHandHint đếm lại idleDelay. */
     public TriggerImmediateHandTut(): void {
         this.scheduleSpawnHandTut(true);
     }
@@ -534,6 +557,13 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     private scheduleSpawnHandTut(noDelay: boolean = false): void {
         if (!this.enableSpawnHandTut || !this.isValid) return;
+
+        // Có IdleHandHint: nó lo thời điểm hiện. Item vừa xuất hiện -> đếm lại từ đầu, không tương tác idleDelay giây mới hiện.
+        const idle = IdleHandHint.Ins;
+        if (idle?.isValid && idle.enabledInHierarchy) {
+            if (noDelay) idle.RestartCountdown();
+            return;
+        }
 
         this.unschedule(this.showSpawnHandTut);
         this.HandPlayer?.Stop(this);
@@ -558,22 +588,16 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     private tryShowSpawnHandTut(): boolean {
         const player = this.HandPlayer;
-        const item = this.getTopPriorityWaitingItem();
-        if (!player || !item) return false;
+        const hint = this.GetHandHint();
+        if (!player || hint?.kind !== 'move') return false;
 
         // Đồng bộ với HandTutManager: tắt gợi ý của nó (nếu đang hiện) trước khi dùng tay.
         HandTutManager.Ins?.ResetHandTutDelay();
-        player.PlayMove(
-            this,
-            () => item.node.worldPosition,
-            () => (item.correctHolderTransform?.activeInHierarchy ? item.correctHolderTransform : item.node).worldPosition,
-            {
-                moveDuration: this.handTutMoveDuration,
-                fadeOutDuration: this.handTutFadeOutDuration,
-                waitAtEndDuration: this.handTutWaitAtEndDuration,
-            },
-            () => this.canContinueHandTut(item),
-        );
+        player.PlayMove(this, hint.getStart, hint.getEnd, {
+            moveDuration: this.handTutMoveDuration,
+            fadeOutDuration: this.handTutFadeOutDuration,
+            waitAtEndDuration: this.handTutWaitAtEndDuration,
+        }, hint.canContinue);
         return true;
     }
 
@@ -589,6 +613,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> {
 
     private canContinueHandTut(item: ItemSnap | null): boolean {
         return !!item?.node
+            && !this.appearingItems.has(item)
             && item.node.activeInHierarchy
             && item.enabled
             && item.currentState === ItemState.Waiting

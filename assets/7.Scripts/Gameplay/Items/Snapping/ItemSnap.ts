@@ -568,6 +568,11 @@ export class ItemSnap extends Component {
     public CanPlaced(): boolean {
         // Holder nằm sau cánh tủ đang đóng thì không snap được.
         if (CabinetDoor.IsHolderBlocked(this.correctHolderTransform)) return false;
+        return this.AreRequiredItemsPlaced();
+    }
+
+    /** Tất cả requiredItems đã đặt xong (không xét cánh tủ). */
+    public AreRequiredItemsPlaced(): boolean {
         if (!this.requiredItems || this.requiredItems.length === 0) return true;
 
         for (let i = 0; i < this.requiredItems.length; i++) {

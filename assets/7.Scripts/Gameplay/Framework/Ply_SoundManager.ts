@@ -28,7 +28,12 @@ export enum FxType {
     WetWipeRub,
     Aha,
     PlaceItem,
-
+    PlaceMetal,     // Đồ kim loại: dụng cụ, ấm, ca
+    PlaceGlass,     // Ly, lọ, chai thuỷ tinh / sứ
+    PlaceCloth,     // Túi giấy / vải mềm
+    PlaceHeavy,     // Máy móc nặng
+    PlaceDecor,     // Tranh, chậu cây, hộp gỗ trang trí
+    PlaceLight,     // Đồ gỗ nhỏ, nhẹ
 }
 Enum(FxType);
 

@@ -1,8 +1,10 @@
-import { _decorator, Component, Enum, Node, Tween, tween, UIOpacity, Vec3 } from 'cc';
+import { _decorator, Component, Enum, EventTouch, input, Input, math, Node, Tween, tween, UIOpacity, UITransform, Vec2, Vec3 } from 'cc';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
 import { ItemSpawnManager } from '../Items/Snapping/ItemSpawnManager';
+import { ItemState } from '../Items/Snapping/ItemSnap';
 import { HandTutManager } from '../Systems/HandTutManager';
 import { HandHintPlayer } from '../Systems/HandHintPlayer';
+import { HandHintRequest, HandHintSource, IdleHandHint } from '../Systems/IdleHandHint';
 import { GameManager } from '../Systems/GameManager';
 import { FxType, Ply_SoundManager } from '../Framework/Ply_SoundManager';
 import { Ply_Event } from '../Framework/Ply_Event';
@@ -34,7 +36,10 @@ Enum(BoxAppearTrigger);
  * Đặt component trên node luôn active (ví dụ Manager); node hộp có thể để inactive trên scene.
  */
 @ccclass('StudyBox')
-export class StudyBox extends Component {
+export class StudyBox extends Component implements HandHintSource {
+    /** Thứ tự ưu tiên trong IdleHandHint: sau gợi ý kéo item và mở cánh tủ. */
+    public static readonly HINT_PRIORITY = 20;
+
 
     // ==================== NODES ====================
 
@@ -124,9 +129,32 @@ export class StudyBox extends Component {
     @property({ min: 0, tooltip: 'Chờ (giây) sau khi item cuối cùng trong hộp nhảy ra rồi hộp mới biến mất.' })
     public hideDelay = 0.25;
 
+    // ==================== MỜ KHI KÉO ITEM LẠI GẦN ====================
+
+    @property({ tooltip: 'Đang kéo item lại gần hộp thì hộp mờ dần (không che chỗ đặt phía sau); kéo ra xa hoặc thả item thì rõ lại.' })
+    public fadeWhenDragNear = true;
+
+    @property({
+        min: 0, tooltip: 'Khoảng cách (world) tính từ mép hộp: item kéo vào trong vùng này thì hộp mờ đi.',
+        visible(this: StudyBox) { return this.fadeWhenDragNear; }
+    })
+    public dragFadeDistance = 120;
+
+    @property({
+        range: [0, 255, 1], slide: true, tooltip: 'Độ mờ của hộp khi item kéo lại gần (0 = ẩn hẳn, 255 = rõ).',
+        visible(this: StudyBox) { return this.fadeWhenDragNear; }
+    })
+    public dragFadeOpacity = 0;
+
+    @property({
+        min: 0.01, tooltip: 'Thời gian mờ đi / rõ lại (giây).',
+        visible(this: StudyBox) { return this.fadeWhenDragNear; }
+    })
+    public dragFadeDuration = 0.2;
+
     // ==================== TAY GỢI Ý BẤM HỘP ====================
 
-    @property({ min: 0, tooltip: 'Sau bao lâu (giây) không bấm thì hiện tay gợi ý bấm hộp. 0 = không gợi ý.' })
+    @property({ min: 0, tooltip: 'Không có IdleHandHint: sau bao lâu (giây) không bấm thì hiện tay gợi ý mở hộp. 0 = không gợi ý. Có IdleHandHint thì nó lo việc này.' })
     public handHintDelay = 3;
 
     @property({ type: Node, tooltip: 'Node tay gợi ý. Để trống: HandTutManager.Ins.handNode.' })
@@ -149,6 +177,9 @@ export class StudyBox extends Component {
     private _ready = false;      // Hộp đã đáp, đang chờ bấm
     private _opened = false;     // Đã bấm mở lần đầu
     private _spawning = false;   // Đợt item đang bay, chặn bấm dồn
+    private _touchOnBox = false;  // Lượt chạm này bắt đầu trong hộp
+    private _touchOnItem = false; // Lượt chạm này bắt đầu trên 1 item -> để item kéo, không tính bấm hộp
+    private readonly _touchStart = new Vec2();
     private readonly _restPos = new Vec3();
     private readonly _restScale = new Vec3(1, 1, 1);
     private _restAngle = 0;
@@ -177,8 +208,17 @@ export class StudyBox extends Component {
         this.setLidOpen(false);
     }
 
+    protected onEnable(): void {
+        IdleHandHint.Register(this, StudyBox.HINT_PRIORITY);
+    }
+
+    protected onDisable(): void {
+        IdleHandHint.Unregister(this);
+    }
+
     protected start(): void {
-        this.box?.on(Node.EventType.TOUCH_END, this.onBoxClick, this);
+        input.on(Input.EventType.TOUCH_START, this.onTouchStart, this);
+        input.on(Input.EventType.TOUCH_END, this.onTouchEnd, this);
         // Bind ở start: ItemCleanManager.Ins đã được gán trong onLoad của nó.
         if (this.shouldWaitForClean()) {
             this.CleanManager!.onAllItemsCleaned.addListener(this._onAllCleaned);
@@ -189,8 +229,13 @@ export class StudyBox extends Component {
 
     protected onDestroy(): void {
         this.CleanManager?.onAllItemsCleaned.removeListener(this._onAllCleaned);
-        if (this.box?.isValid) this.box.off(Node.EventType.TOUCH_END, this.onBoxClick, this);
+        input.off(Input.EventType.TOUCH_START, this.onTouchStart, this);
+        input.off(Input.EventType.TOUCH_END, this.onTouchEnd, this);
         this.hideHandHint();
+    }
+
+    protected update(dt: number): void {
+        this.updateDragFade(dt);
     }
 
     /** Auto + có ItemCleanManager còn bước dọn chưa xong -> đợi onAllItemsCleaned. */
@@ -234,6 +279,48 @@ export class StudyBox extends Component {
     }
 
     // ==================== BẤM HỘP ====================
+
+    /**
+     * Nghe touch toàn cục (như InputManager) thay vì đăng ký trên node hộp: node có listener sẽ nuốt touch,
+     * InputManager không nhận được -> không kéo được item nằm đè lên hộp.
+     * Bấm hộp = chạm & nhả trong hộp, không trượt xa, và lúc chạm KHÔNG trúng item đang chờ (ưu tiên kéo item).
+     */
+    private onTouchStart(event: EventTouch): void {
+        event.getUILocation(this._touchStart);
+        this._touchOnBox = this.isPointOnBox(this._touchStart);
+        this._touchOnItem = this._touchOnBox && this.isTouchOnWaitingItem(this._touchStart);
+    }
+
+    private onTouchEnd(event: EventTouch): void {
+        const end = event.getUILocation();
+        const isTap = Vec2.distance(this._touchStart, end) <= 25;
+        const valid = this._touchOnBox && !this._touchOnItem && isTap && this.isPointOnBox(end);
+        this._touchOnBox = false;
+        if (valid) this.onBoxClick();
+    }
+
+    private isPointOnBox(uiPos: Vec2): boolean {
+        const box = this.box;
+        return !!box?.activeInHierarchy && this.containsPoint(box.getComponent(UITransform), uiPos);
+    }
+
+    private containsPoint(ut: UITransform | null, uiPos: Vec2): boolean {
+        if (!ut) return false;
+        const local = ut.convertToNodeSpaceAR(new Vec3(uiPos.x, uiPos.y, 0));
+        const left = -ut.anchorX * ut.width, bottom = -ut.anchorY * ut.height;
+        return local.x >= left && local.x <= left + ut.width && local.y >= bottom && local.y <= bottom + ut.height;
+    }
+
+    /**
+     * Cùng cách InputManager tìm item để kéo: item đang chờ, có UITransform chứa điểm chạm.
+     * Tính cả OnDrag vì InputManager có thể nhận touch này trước và đã bắt đầu kéo item.
+     */
+    private isTouchOnWaitingItem(uiPos: Vec2): boolean {
+        return !!this.Spawner?.dynamicItems.some(item => !!item?.enabled
+            && (item.currentState === ItemState.Waiting || item.currentState === ItemState.OnDrag)
+            && item.node.activeInHierarchy
+            && this.containsPoint(item.getComponent(UITransform), uiPos));
+    }
 
     private onBoxClick(): void {
         if (!this._ready || this._spawning) return;
@@ -360,6 +447,30 @@ export class StudyBox extends Component {
             .start();
     }
 
+    // ==================== MỜ KHI KÉO ITEM LẠI GẦN ====================
+
+    /** Item đang kéo ở gần hộp -> mờ dần; kéo ra xa / thả item -> rõ dần. Chỉ chạy khi hộp đang đứng chờ bấm. */
+    private updateDragFade(dt: number): void {
+        const box = this.box;
+        if (!this.fadeWhenDragNear || !this._ready || !box?.activeInHierarchy) return;
+
+        const dragging = this.Spawner?.dynamicItems.find(item => item?.currentState === ItemState.OnDrag) ?? null;
+        const faded = !!dragging && this.isNearBox(dragging.node.worldPosition);
+
+        const opacity = box.getComponent(UIOpacity) ?? box.addComponent(UIOpacity);
+        const target = faded ? this.dragFadeOpacity : 255;
+        const step = 255 * dt / this.dragFadeDuration;
+        opacity.opacity = Math.round(math.clamp(opacity.opacity + math.clamp(target - opacity.opacity, -step, step), 0, 255));
+    }
+
+    private isNearBox(worldPos: Vec3): boolean {
+        const rect = this.box?.getComponent(UITransform)?.getBoundingBoxToWorld();
+        if (!rect) return false;
+        const d = this.dragFadeDistance;
+        return worldPos.x >= rect.xMin - d && worldPos.x <= rect.xMax + d
+            && worldPos.y >= rect.yMin - d && worldPos.y <= rect.yMax + d;
+    }
+
     private startShake(): void {
         const box = this.box;
         if (!box) return;
@@ -402,8 +513,22 @@ export class StudyBox extends Component {
 
     // ==================== TAY GỢI Ý BẤM HỘP ====================
 
+    /** HandHintSource: hộp đang chờ bấm và còn item -> nhấn vào hộp. */
+    public GetHandHint(): HandHintRequest | null {
+        const box = this.box;
+        if (!box || !this.canClickForHint()) return null;
+        return { kind: 'tap', target: box, canContinue: () => this.canClickForHint() };
+    }
+
+    private canClickForHint(): boolean {
+        if (!this._ready || this._spawning || !this.box?.activeInHierarchy) return false;
+        return !this._opened || (this.Spawner?.GetRemainingItemCount() ?? 0) > 0;
+    }
+
+    /** Không có IdleHandHint: tự hẹn giờ gợi ý mở hộp sau handHintDelay. */
     private scheduleHandHint(): void {
-        if (this.handHintDelay <= 0) return;
+        const idle = IdleHandHint.Ins;
+        if (this.handHintDelay <= 0 || (idle?.isValid && idle.enabledInHierarchy)) return;
         this.unschedule(this.showHandHint);
         this.scheduleOnce(this.showHandHint, this.handHintDelay);
     }

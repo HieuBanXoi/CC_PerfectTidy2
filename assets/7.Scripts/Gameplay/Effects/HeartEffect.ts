@@ -31,7 +31,7 @@ export class HeartEffect extends PoolMember {
         this.ResetState();
 
         this.node.setScale(Vec3.ZERO);
-        Ply_SoundManager.Ins.PlayFx(FxType.Complete);
+        // Ply_SoundManager.Ins.PlayFx(FxType.Complete);
 
         const targetScale = new Vec3(
             this.defaultScale.x * Math.max(0, scaleMultiplier),
