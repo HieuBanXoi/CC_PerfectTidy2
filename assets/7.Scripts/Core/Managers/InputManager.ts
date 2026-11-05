@@ -297,13 +297,18 @@ export class InputManager extends Ply_Singleton<InputManager> {
     bindingEnd(event: EventTouch) {}
     bindingUpdate() {}
 
-    onTouchStart(event: EventTouch) {
-        const wasInputLocked = this.isInputLocked;
+    /** Lần chạm đầu tiên: bật BGM + UI.firstMove(). Gọi được từ chỗ khác (VD node đã nuốt touch nên input global không nhận). */
+    public TriggerFirstMove(): void {
         if (this.isFirstMove && GameManager.Ins?.IsPlaying()) {
             this.isFirstMove = false;
             Ply_SoundManager.Ins?.PlayBgm();
             ui?.firstMove();
         }
+    }
+
+    onTouchStart(event: EventTouch) {
+        const wasInputLocked = this.isInputLocked;
+        this.TriggerFirstMove();
         // The first touch only dismisses the UI intro. Gameplay begins with
         // the following touch after UI.firstMove() unlocks this manager.
         if (wasInputLocked || this.isInputLocked) return;

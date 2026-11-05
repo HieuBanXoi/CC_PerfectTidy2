@@ -158,7 +158,6 @@ export class GridBoard extends Component {
             }
             this.piecesRoot = root;
         }
-        this.piecesRoot.setSiblingIndex(this.node.children.length - 1);
         let sr = this.node.getChildByName('Shadows');
         if (!sr) {
             sr = new Node('Shadows');
@@ -168,7 +167,9 @@ export class GridBoard extends Component {
         }
         sr.setPosition(this.piecesRoot.position);
         sr.setScale(this.piecesRoot.scale);
-        sr.setSiblingIndex(this.piecesRoot.getSiblingIndex()); // ngay trước Pieces
+        // Thứ tự: ... Shadows -> Pieces (bóng luôn dưới mọi món), kể cả khi 2 node đã có sẵn trong scene
+        sr.setSiblingIndex(this.node.children.length - 1);
+        this.piecesRoot.setSiblingIndex(this.node.children.length - 1);
         this.shadowsRoot = sr;
         if (this.cover) {
             this._coverPos.set(this.cover.position);

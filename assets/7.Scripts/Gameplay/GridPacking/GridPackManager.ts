@@ -5,6 +5,7 @@ import { PackContainer } from './PackContainer';
 import { GameManager } from '../Systems/GameManager';
 import { HandHintRequest, HandHintSource, IdleHandHint } from '../Systems/IdleHandHint';
 import { FxType, Ply_SoundManager } from '../Framework/Ply_SoundManager';
+import { ipm } from '../../Core/Managers/InputManager';
 const { ccclass, property } = _decorator;
 
 type DropTarget =
@@ -257,6 +258,8 @@ export class GridPackManager extends Component implements HandHintSource {
     // ================================================================ Drag
 
     public onPieceTouchStart(p: GridPiece, e: EventTouch): boolean {
+        // Node đã nuốt touch -> input global của InputManager không nhận: tự bật BGM + firstMove ở lần chạm đầu.
+        ipm?.TriggerFirstMove();
         if (this._won || this._drag || this._pendingBox || this._introPlaying) return false;
         if (GameManager.Ins && GameManager.Ins.isGotoStore) return false;
         // Hộp con: chờ xem là CHẠM (mở/đóng nắp) hay KÉO (chỉ khi đang đóng).
