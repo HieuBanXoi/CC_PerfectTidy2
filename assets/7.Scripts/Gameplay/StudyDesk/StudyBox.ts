@@ -1,4 +1,4 @@
-import { _decorator, Component, Enum, EventTouch, input, Input, math, Node, Tween, tween, UIOpacity, UITransform, Vec2, Vec3 } from 'cc';
+import { _decorator, Component, Enum, EventTouch, input, Input, macro, math, Node, sp, Tween, tween, UIOpacity, UITransform, Vec2, Vec3 } from 'cc';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
 import { ItemSpawnManager } from '../Items/Snapping/ItemSpawnManager';
 import { ItemState } from '../Items/Snapping/ItemSnap';
@@ -25,11 +25,26 @@ export enum BoxAppearTrigger {
 }
 Enum(BoxAppearTrigger);
 
+export enum BoxVisualMode {
+    /** Hộp bằng 2 sprite (đóng / mở), hiệu ứng bằng tween. */
+    Sprite = 0,
+    /** Hộp bằng Spine: dùng các anim của spine (Drop, ready, OPEN, click, End). */
+    Spine = 1,
+}
+Enum(BoxVisualMode);
+
+/** Một lần bấm đang chờ tới đúng frame (tween / event spine) mới cho item bay ra. */
+interface PendingSpawn {
+    count: number;
+    isFirst: boolean;
+}
+
 /**
  * Hộp đồ:
- * 1. Xuất hiện (theo appearTrigger): phi từ dưới lên, rung rung chờ bấm; lâu không bấm thì hiện tay gợi ý.
- * 2. Bấm lần đầu: nhún, nảy, đổi sang sprite mở, ra firstClickSpawnCount item (0 = hết).
- * 3. Các lần bấm sau: nhún nhẹ, ra nextClickSpawnCount item. Hết item thì hộp thu nhỏ biến mất.
+ * 1. Xuất hiện (theo appearTrigger): phi từ dưới lên (Spine: anim Drop), rung chờ bấm; lâu không bấm thì hiện tay gợi ý.
+ * 2. Bấm lần đầu: nhún, nảy, đổi sang sprite mở (Spine: anim OPEN), ra firstClickSpawnCount item (0 = hết).
+ * 3. Các lần bấm sau: punch (Spine: anim click), ra nextClickSpawnCount item. Bấm nhanh / giữ tay thì punch liên tục,
+ *    item bay ra liên tục, không cần đợi đợt trước đáp. Hết item thì hộp biến mất (Spine: anim End).
  * 4. Đợt đầu đáp xong thì bật popup Tutorial (nếu có); thu popup vào icon rồi mới hiện tay gợi ý kéo item.
  *
  * Độc lập: ItemCleanManager / TutorialPopup đều tuỳ chọn. Item do ItemSpawnManager spawn (không có thì hộp chỉ mở rồi ẩn).
@@ -46,11 +61,58 @@ export class StudyBox extends Component implements HandHintSource {
     @property({ type: Node, tooltip: 'Node hộp (Box). Ẩn lúc đầu, xuất hiện theo appearTrigger.' })
     public box: Node | null = null;
 
-    @property({ type: Node, tooltip: 'Sprite hộp đóng (Sealed_cardboard_box).' })
+    @property({ type: Enum(BoxVisualMode), tooltip: 'Sprite: 2 sprite đóng / mở + tween. Spine: dùng anim của spine cho mượt.' })
+    public visualMode: BoxVisualMode = BoxVisualMode.Sprite;
+
+    @property({
+        type: Node, tooltip: 'Sprite hộp đóng (Sealed_cardboard_box).',
+        visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Sprite; }
+    })
     public closedNode: Node | null = null;
 
-    @property({ type: Node, tooltip: 'Sprite hộp mở (Open_top_carton). Ẩn lúc đầu.' })
+    @property({
+        type: Node, tooltip: 'Sprite hộp mở (Open_top_carton). Ẩn lúc đầu.',
+        visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Sprite; }
+    })
     public openNode: Node | null = null;
+
+    // ==================== SPINE ====================
+
+    @property({
+        type: sp.Skeleton, tooltip: 'Spine hộp (box-ingame). Để trống: tự tìm trong node box.',
+        visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; }
+    })
+    public spine: sp.Skeleton | null = null;
+
+    @property({
+        tooltip: 'Anim pose nền chạy ở track 0 (ví dụ Setup-A-5). Để trống: giữ anim đang chọn trên component Skeleton.',
+        visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; }
+    })
+    public spineSetupAnim = '';
+
+    @property({ tooltip: 'Anim hộp rơi xuống khi xuất hiện.', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineDropAnim = '0-Drop';
+
+    @property({ tooltip: 'Anim lặp khi hộp đóng chờ bấm.', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineReadyAnim = '1-ready-Loop';
+
+    @property({ tooltip: 'Anim mở nắp (bấm lần đầu).', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineOpenAnim = '2-OPEN';
+
+    @property({ tooltip: 'Anim lặp khi hộp đã mở chờ bấm tiếp.', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineOpenLoopAnim = '3-OPEN-loop';
+
+    @property({ tooltip: 'Anim punch mỗi lần bấm sau khi đã mở.', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineClickAnim = '3-OPEN-click';
+
+    @property({ tooltip: 'Anim kết thúc khi hộp hết item. Để trống: thu nhỏ biến mất như mode Sprite.', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineEndAnim = '4-End';
+
+    @property({ tooltip: 'Tên event spine báo frame item bật ra (OPEN / click). Không có event: item ra sau spineSpawnFallback giây.', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineSpawnEvent = 'Item-A';
+
+    @property({ min: 0, tooltip: 'Anim không bắn event: chờ bao lâu (giây) sau khi bấm thì cho item ra.', visible(this: StudyBox) { return this.visualMode === BoxVisualMode.Spine; } })
+    public spineSpawnFallback = 0.6;
 
     @property({ type: Node, tooltip: 'Điểm item nhảy ra. Để trống: node hộp.' })
     public spawnPoint: Node | null = null;
@@ -108,6 +170,18 @@ export class StudyBox extends Component implements HandHintSource {
 
     @property({ tooltip: 'Bắn hiệu ứng sao khi hộp mở.' })
     public playOpenVfx = true;
+
+    @property({ tooltip: 'Sau khi mở: bấm liên tục được, không cần đợi đợt item trước đáp xuống.' })
+    public allowRapidClick = true;
+
+    @property({ min: 0, tooltip: 'Khoảng cách tối thiểu (giây) giữa 2 lần punch.', visible(this: StudyBox) { return this.allowRapidClick; } })
+    public clickCooldown = 0.08;
+
+    @property({ min: 0, tooltip: 'Giữ tay trên hộp thì tự punch liên tục mỗi chừng này giây. 0 = tắt.' })
+    public holdRepeatInterval = 0.15;
+
+    @property({ min: 0, tooltip: 'Giữ tay bao lâu (giây) thì bắt đầu punch liên tục.', visible(this: StudyBox) { return this.holdRepeatInterval > 0; } })
+    public holdRepeatDelay = 0.3;
 
     // ==================== ITEM BAY RA ====================
 
@@ -176,10 +250,16 @@ export class StudyBox extends Component implements HandHintSource {
     private _appeared = false;
     private _ready = false;      // Hộp đã đáp, đang chờ bấm
     private _opened = false;     // Đã bấm mở lần đầu
-    private _spawning = false;   // Đợt item đang bay, chặn bấm dồn
+    private _opening = false;    // Đang anim mở nắp, chặn bấm tới khi đợt đầu bay ra
+    private _hiding = false;     // Hết item, đang biến mất
+    private _inFlight = 0;       // Số đợt item đang bay
+    private _cooldown = 0;
+    private readonly _pending: PendingSpawn[] = [];
     private _touchOnBox = false;  // Lượt chạm này bắt đầu trong hộp
     private _touchOnItem = false; // Lượt chạm này bắt đầu trên 1 item -> để item kéo, không tính bấm hộp
+    private _holdFired = false;   // Lượt chạm này đã punch bằng giữ tay -> nhả tay không tính thêm 1 lần bấm
     private readonly _touchStart = new Vec2();
+    private readonly _touchNow = new Vec2();
     private readonly _restPos = new Vec3();
     private readonly _restScale = new Vec3(1, 1, 1);
     private _restAngle = 0;
@@ -205,6 +285,7 @@ export class StudyBox extends Component implements HandHintSource {
         this._restScale.set(box.scale);
         this._restAngle = box.angle;
         box.active = false;
+        this.initVisualMode();
         this.setLidOpen(false);
     }
 
@@ -218,7 +299,9 @@ export class StudyBox extends Component implements HandHintSource {
 
     protected start(): void {
         input.on(Input.EventType.TOUCH_START, this.onTouchStart, this);
+        input.on(Input.EventType.TOUCH_MOVE, this.onTouchMove, this);
         input.on(Input.EventType.TOUCH_END, this.onTouchEnd, this);
+        input.on(Input.EventType.TOUCH_CANCEL, this.onTouchCancel, this);
         // Bind ở start: ItemCleanManager.Ins đã được gán trong onLoad của nó.
         if (this.shouldWaitForClean()) {
             this.CleanManager!.onAllItemsCleaned.addListener(this._onAllCleaned);
@@ -230,12 +313,59 @@ export class StudyBox extends Component implements HandHintSource {
     protected onDestroy(): void {
         this.CleanManager?.onAllItemsCleaned.removeListener(this._onAllCleaned);
         input.off(Input.EventType.TOUCH_START, this.onTouchStart, this);
+        input.off(Input.EventType.TOUCH_MOVE, this.onTouchMove, this);
         input.off(Input.EventType.TOUCH_END, this.onTouchEnd, this);
+        input.off(Input.EventType.TOUCH_CANCEL, this.onTouchCancel, this);
+        this.stopHoldRepeat();
         this.hideHandHint();
     }
 
     protected update(dt: number): void {
+        if (this._cooldown > 0) this._cooldown -= dt;
         this.updateDragFade(dt);
+    }
+
+    // ==================== VISUAL MODE ====================
+
+    private get IsSpine(): boolean {
+        return this.visualMode === BoxVisualMode.Spine && !!this.spine;
+    }
+
+    /** Spine: bật node spine, tắt 2 sprite, nghe event bật item. Sprite: tắt node spine (nếu có). */
+    private initVisualMode(): void {
+        if (!this.spine && this.box) this.spine = this.box.getComponentInChildren(sp.Skeleton);
+        const useSpine = this.visualMode === BoxVisualMode.Spine;
+        if (useSpine && !this.spine) {
+            console.warn('[StudyBox] visualMode = Spine nhưng không tìm thấy sp.Skeleton trong box, dùng Sprite.');
+            this.visualMode = BoxVisualMode.Sprite;
+        }
+
+        if (this.spine) this.spine.node.active = this.IsSpine;
+        if (!this.IsSpine) return;
+
+        if (this.closedNode) this.closedNode.active = false;
+        if (this.openNode) this.openNode.active = false;
+        // Lúc này box còn inactive (Skeleton chưa khởi tạo) -> pose nền set ở Appear. Listener thì lưu được luôn.
+        this.spine!.setEventListener((_entry: any, event: any) => {
+            if (event?.data?.name === this.spineSpawnEvent) this.onSpineSpawnEvent();
+        });
+    }
+
+    /**
+     * Chạy anim chính ở track 1 (track 0 giữ pose nền Setup-A-x; anim chính đè lên các bone nó key).
+     * loopAfter: anim lặp nối tiếp. Trả về thời lượng anim (0 nếu không có anim đó).
+     */
+    private playSpine(name: string, loop: boolean, loopAfter = ''): number {
+        const skel = this.spine;
+        if (!skel || !name) return 0;
+        const anim = skel.findAnimation(name);
+        if (!anim) {
+            console.warn(`[StudyBox] Spine không có anim "${name}".`);
+            return 0;
+        }
+        skel.setAnimation(1, name, loop);
+        if (loopAfter && skel.findAnimation(loopAfter)) skel.addAnimation(1, loopAfter, true, 0);
+        return anim.duration;
     }
 
     /** Auto + có ItemCleanManager còn bước dọn chưa xong -> đợi onAllItemsCleaned. */
@@ -258,6 +388,21 @@ export class StudyBox extends Component implements HandHintSource {
             const s = this._restScale;
             Tween.stopAllByTarget(box);
             box.active = true;
+
+            if (this.IsSpine) {
+                // Spine: đứng tại chỗ, anim Drop lo phần rơi xuống, xong thì lặp anim ready.
+                box.setPosition(rest);
+                box.angle = this._restAngle;
+                box.setScale(s);
+                const skel = this.spine!;
+                if (this.spineSetupAnim && skel.findAnimation(this.spineSetupAnim)) skel.setAnimation(0, this.spineSetupAnim, true);
+                Ply_SoundManager.Ins?.PlayFx(this.appearFxType);
+                const dur = this.playSpine(this.spineDropAnim, false, this.spineReadyAnim);
+                if (dur <= 0) this.playSpine(this.spineReadyAnim, true);
+                this.scheduleOnce(() => this.onLanded(), dur);
+                return;
+            }
+
             box.setPosition(rest.x, rest.y - this.flyDistance, rest.z);
             box.angle = this._restAngle - 25;
             box.setScale(s.x * 0.9, s.y * 1.15, s.z);
@@ -274,7 +419,7 @@ export class StudyBox extends Component implements HandHintSource {
 
     private onLanded(): void {
         this._ready = true;
-        this.startShake();
+        if (!this.IsSpine) this.startShake();   // Spine: anim ready-Loop đã tự lắc
         this.scheduleHandHint();
     }
 
@@ -287,17 +432,52 @@ export class StudyBox extends Component implements HandHintSource {
      */
     private onTouchStart(event: EventTouch): void {
         event.getUILocation(this._touchStart);
+        this._touchNow.set(this._touchStart);
         this._touchOnBox = this.isPointOnBox(this._touchStart);
         this._touchOnItem = this._touchOnBox && this.isTouchOnWaitingItem(this._touchStart);
+        this._holdFired = false;
+        if (this._touchOnBox && !this._touchOnItem) this.startHoldRepeat();
+    }
+
+    private onTouchMove(event: EventTouch): void {
+        event.getUILocation(this._touchNow);
     }
 
     private onTouchEnd(event: EventTouch): void {
         const end = event.getUILocation();
         const isTap = Vec2.distance(this._touchStart, end) <= 25;
-        const valid = this._touchOnBox && !this._touchOnItem && isTap && this.isPointOnBox(end);
+        const valid = this._touchOnBox && !this._touchOnItem && !this._holdFired && isTap && this.isPointOnBox(end);
         this._touchOnBox = false;
+        this.stopHoldRepeat();
         if (valid) this.onBoxClick();
     }
+
+    private onTouchCancel(): void {
+        this._touchOnBox = false;
+        this.stopHoldRepeat();
+    }
+
+    // ----- Giữ tay: punch liên tục -----
+
+    private startHoldRepeat(): void {
+        this.stopHoldRepeat();
+        if (this.holdRepeatInterval <= 0) return;
+        this.schedule(this.onHoldTick, this.holdRepeatInterval, macro.REPEAT_FOREVER, this.holdRepeatDelay);
+    }
+
+    private stopHoldRepeat(): void {
+        this.unschedule(this.onHoldTick);
+    }
+
+    private onHoldTick = (): void => {
+        // Kéo tay ra khỏi hộp / trượt xa (đang kéo item) thì dừng.
+        if (!this._touchOnBox || Vec2.distance(this._touchStart, this._touchNow) > 25 || !this.isPointOnBox(this._touchNow)) {
+            this.stopHoldRepeat();
+            return;
+        }
+        this._holdFired = true;
+        this.onBoxClick();
+    };
 
     private isPointOnBox(uiPos: Vec2): boolean {
         const box = this.box;
@@ -323,22 +503,30 @@ export class StudyBox extends Component implements HandHintSource {
     }
 
     private onBoxClick(): void {
-        if (!this._ready || this._spawning) return;
+        if (!this._ready || this._opening || this._hiding) return;
         if (GameManager.Ins && !GameManager.Ins.IsPlaying()) return;
         if (!this._opened) this.Open();
         else this.SpawnMore();
     }
 
-    /** Bấm lần đầu: nhún, nảy lên, đổi sprite mở, ra đợt item đầu. */
+    /** Bấm lần đầu: nhún, nảy lên, đổi sprite mở (Spine: anim OPEN), ra đợt item đầu. */
     public Open(): void {
         const box = this.box;
         if (!box || this._opened) return;
         this._opened = true;
-        this._spawning = true;
+        this._opening = true;
         this.stopShake();
         this.hideHandHint();
         this.playClickFeedback();
         this.onOpened.invoke();
+        this.queueSpawn(this.firstClickSpawnCount, true);
+
+        if (this.IsSpine) {
+            // Item bay ra ở event Item-A của anim OPEN (fallback: hết anim).
+            const dur = this.playSpine(this.spineOpenAnim, false, this.spineOpenLoopAnim);
+            this.scheduleSpawnFallback(dur > 0 ? dur : 0);
+            return;
+        }
 
         const rest = this._restPos;
         Tween.stopAllByTarget(box);
@@ -347,35 +535,44 @@ export class StudyBox extends Component implements HandHintSource {
         tween(box)
             .to(0.14, { scale: this.scaled(1.2, 0.78) }, { easing: 'quadOut' })
             .to(0.18, { scale: this.scaled(0.88, 1.2), position: new Vec3(rest.x, rest.y + this.bounceHeight, rest.z) }, { easing: 'quadOut' })
-            .call(() => this.openLid())
+            .call(() => this.flushPendingSpawns())
             .to(0.16, { scale: this._restScale, position: rest }, { easing: 'quadIn' })
             .to(0.08, { scale: this.scaled(1.1, 0.9) }, { easing: 'quadOut' })
             .to(0.14, { scale: this._restScale }, { easing: 'backOut' })
             .start();
     }
 
-    /** Các lần bấm sau khi đã mở: nhún nhẹ rồi ra thêm nextClickSpawnCount item. */
+    /**
+     * Các lần bấm sau khi đã mở: punch (Spine: anim click) rồi ra thêm nextClickSpawnCount item.
+     * allowRapidClick: bấm dồn được, mỗi lần bấm khởi động lại punch, item bay ra liên tục.
+     */
     public SpawnMore(): void {
         const box = this.box;
-        if (!box || !this._opened || this._spawning) return;
-        this._spawning = true;
+        if (!box || !this._opened || this._opening || this._hiding) return;
+        if (this.allowRapidClick ? this._cooldown > 0 : (this._inFlight > 0 || this._pending.length > 0)) return;
+        if ((this.Spawner?.GetRemainingItemCount() ?? 0) - this.pendingCount() <= 0) return;
+        this._cooldown = this.clickCooldown;
+
+        // Punch trước chưa tới frame ra item mà đã bị bấm đè: cho item của nó ra luôn, không bị mất.
+        this.flushPendingSpawns();
+        this.hideHandHint();
         this.playClickFeedback();
+        this.queueSpawn(this.nextClickSpawnCount, false);
+
+        if (this.IsSpine) {
+            const dur = this.playSpine(this.spineClickAnim, false, this.spineOpenLoopAnim);
+            this.scheduleSpawnFallback(dur > 0 ? Math.min(dur, this.spineSpawnFallback) : 0);
+            return;
+        }
 
         Tween.stopAllByTarget(box);
         box.setPosition(this._restPos);
         box.setScale(this._restScale);
         tween(box)
-            .to(0.1, { scale: this.scaled(1.15, 0.85) }, { easing: 'quadOut' })
-            .call(() => this.spawnItems(this.nextClickSpawnCount, false))
-            .to(0.18, { scale: this._restScale }, { easing: 'backOut' })
+            .to(0.08, { scale: this.scaled(1.15, 0.85) }, { easing: 'quadOut' })
+            .call(() => this.flushPendingSpawns())
+            .to(0.16, { scale: this._restScale }, { easing: 'backOut' })
             .start();
-    }
-
-    private openLid(): void {
-        this.setLidOpen(true);
-        Ply_SoundManager.Ins?.PlayFx(this.openFxType);
-        this.spawnOpenVfx();
-        this.spawnItems(this.firstClickSpawnCount, true);
     }
 
     private playClickFeedback(): void {
@@ -385,19 +582,60 @@ export class StudyBox extends Component implements HandHintSource {
 
     // ==================== ITEM BAY RA ====================
 
+    private queueSpawn(count: number, isFirst: boolean): void {
+        this._pending.push({ count, isFirst });
+    }
+
+    private pendingCount(): number {
+        let total = 0;
+        for (const p of this._pending) total += p.count > 0 ? p.count : Number.MAX_SAFE_INTEGER;
+        return total;
+    }
+
+    /** Event Item-A của spine: cho 1 lần bấm đang chờ ra item. */
+    private onSpineSpawnEvent(): void {
+        const next = this._pending.shift();
+        if (next) this.spawnRequest(next);
+        if (this._pending.length === 0) this.unschedule(this.flushPendingSpawns);
+    }
+
+    /** Anim không bắn event (hoặc bị cắt ngang): sau delay giây vẫn cho item ra. */
+    private scheduleSpawnFallback(delay: number): void {
+        this.unschedule(this.flushPendingSpawns);
+        this.scheduleOnce(this.flushPendingSpawns, Math.min(delay, this.spineSpawnFallback));
+    }
+
+    private flushPendingSpawns = (): void => {
+        this.unschedule(this.flushPendingSpawns);
+        while (this._pending.length > 0) this.spawnRequest(this._pending.shift()!);
+    };
+
+    private spawnRequest(req: PendingSpawn): void {
+        if (req.isFirst) this.openLid();
+        this.spawnItems(req.count, req.isFirst);
+    }
+
+    private openLid(): void {
+        this._opening = false;
+        this.setLidOpen(true);
+        Ply_SoundManager.Ins?.PlayFx(this.openFxType);
+        this.spawnOpenVfx();
+    }
+
     /** Ra requested item (<= 0: ra hết). Hết item trong hộp thì hộp biến mất, còn thì ở lại cho bấm tiếp. */
     private spawnItems(requested: number, isFirst: boolean): void {
+        if (this._hiding) return;
         const spawner = this.Spawner;
         const remaining = spawner?.GetRemainingItemCount() ?? 0;
         if (!spawner || remaining <= 0) {
             if (!spawner) console.warn('[StudyBox] Không có ItemSpawnManager để spawn item.');
-            this._spawning = false;
             this.hideBox(0);
             return;
         }
 
         const count = requested > 0 ? Math.min(requested, remaining) : remaining;
         const from = (this.spawnPoint ?? this.box!).worldPosition.clone();
+        this._inFlight++;
         // Item bay ra các vị trí rải đều trong vùng spawn, hạn chế đè nhau.
         spawner.SpawnBatchFromSource(from, count, this.itemFlyDuration, this.itemJumpHeight, this.itemStagger,
             () => this.onItemsLanded(spawner, isFirst));
@@ -405,13 +643,13 @@ export class StudyBox extends Component implements HandHintSource {
     }
 
     private onItemsLanded(spawner: ItemSpawnManager, isFirst: boolean): void {
-        this._spawning = false;
+        this._inFlight = Math.max(0, this._inFlight - 1);
         this.onAllItemsLanded.invoke();
 
         // Tay gợi ý kéo item chỉ hiện sau khi người chơi thu Tutorial (đợt đầu) vào icon.
         const popup = this.tutorialPopup;
         if (!isFirst || !popup || popup.HasShown) {
-            spawner.TriggerImmediateHandTut();
+            if (this._inFlight === 0) spawner.TriggerImmediateHandTut();
             return;
         }
         const onMinimized = () => {
@@ -425,17 +663,38 @@ export class StudyBox extends Component implements HandHintSource {
     // ==================== HỘP ====================
 
     private setLidOpen(open: boolean): void {
+        if (this.IsSpine) return;   // Spine: nắp mở theo anim OPEN
         if (this.closedNode) this.closedNode.active = !open;
         if (this.openNode) this.openNode.active = open;
     }
 
     private hideBox(delay: number): void {
         const box = this.box;
-        if (!box) return;
+        if (!box || this._hiding) return;
+        this._hiding = true;
         this._ready = false;
+        this._pending.length = 0;
+        this.unschedule(this.flushPendingSpawns);
+        this.stopHoldRepeat();
+        this.hideHandHint();
         this.onEmptied.invoke();
 
         const opacity = box.getComponent(UIOpacity) ?? box.addComponent(UIOpacity);
+        opacity.opacity = 255;   // Có thể đang mờ do kéo item lại gần
+
+        if (this.IsSpine && this.spine!.findAnimation(this.spineEndAnim)) {
+            // Spine: đợi punch cuối chạy xong rồi chạy anim End, hết anim thì mờ dần và tắt.
+            this.scheduleOnce(() => {
+                const dur = this.playSpine(this.spineEndAnim, false);
+                tween(opacity)
+                    .delay(dur)
+                    .to(0.2, { opacity: 0 })
+                    .call(() => { box.active = false; })
+                    .start();
+            }, Math.max(delay, 0.3));
+            return;
+        }
+
         tween(box)
             .delay(delay)
             .to(0.3, { scale: Vec3.ZERO }, { easing: 'backIn' })
@@ -521,7 +780,7 @@ export class StudyBox extends Component implements HandHintSource {
     }
 
     private canClickForHint(): boolean {
-        if (!this._ready || this._spawning || !this.box?.activeInHierarchy) return false;
+        if (!this._ready || this._opening || this._hiding || this._inFlight > 0 || !this.box?.activeInHierarchy) return false;
         return !this._opened || (this.Spawner?.GetRemainingItemCount() ?? 0) > 0;
     }
 

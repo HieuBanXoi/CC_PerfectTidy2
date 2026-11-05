@@ -150,6 +150,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> implements
     // ==================== STATE ====================
 
     private currentItemIndex: number = 0;
+    private reservedItemCount: number = 0;   // Item đã được đợt SpawnBatchFromSource nhận nhưng chưa bay ra (stagger)
     private placedItemCount: number = 0;
     private isReachedLimit: boolean = false;
     private hasShownInitialSpawnHandTut: boolean = false;
@@ -205,11 +206,12 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> implements
 
     /** Còn item chưa spawn. */
     public HasItems(): boolean {
-        return this.currentItemIndex < this.dynamicItems.length;
+        return this.currentItemIndex + this.reservedItemCount < this.dynamicItems.length;
     }
 
+    /** Số item chưa spawn và chưa bị đợt SpawnBatchFromSource nào giữ chỗ. */
     public GetRemainingItemCount(): number {
-        return Math.max(0, this.dynamicItems.length - this.currentItemIndex);
+        return Math.max(0, this.dynamicItems.length - this.currentItemIndex - this.reservedItemCount);
     }
 
     /** Quét Scene, nạp tất cả ItemSnap (trừ node shadow _sd) vào dynamicItems. */
@@ -360,9 +362,12 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> implements
         onAllLanded?: () => void
     ): number {
         if (this.isReachedLimit) return 0;
-        const batch = this.dynamicItems.slice(this.currentItemIndex, this.currentItemIndex + Math.max(0, count));
+        // Bỏ qua các item đợt trước đã giữ chỗ (bấm hộp liên tục: nhiều đợt chồng nhau).
+        const start = this.currentItemIndex + this.reservedItemCount;
+        const batch = this.dynamicItems.slice(start, start + Math.max(0, count));
         const total = batch.length;
         if (total <= 0) return 0;
+        this.reservedItemCount += total;
 
         // Chốt góc xoay trước để tính chỗ chiếm theo đúng góc lúc item đáp xuống.
         const valid = batch.filter(item => !!item?.node);
@@ -382,6 +387,7 @@ export class ItemSpawnManager extends Ply_Singleton<ItemSpawnManager> implements
         };
         for (let i = 0; i < total; i++) {
             this.scheduleOnce(() => {
+                this.reservedItemCount = Math.max(0, this.reservedItemCount - 1);
                 const next = this.dynamicItems[this.currentItemIndex];
                 const target = next ? targets.get(next) ?? null : null;
                 const spawned = this.SpawnNextItemFromSource(sourceWorldPos, i, total, flyDuration, jumpHeight,
