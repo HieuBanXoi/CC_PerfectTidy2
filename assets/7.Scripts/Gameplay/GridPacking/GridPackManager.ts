@@ -1,4 +1,4 @@
-import { _decorator, Canvas, Color, Component, EventTouch, instantiate, Node, ParticleSystem2D, Prefab, Sprite, SpriteFrame, Tween, tween, UIOpacity, UITransform, Vec2, Vec3, v3 } from 'cc';
+import { _decorator, ccenum, Canvas, Color, Component, EventTouch, instantiate, Node, ParticleSystem2D, Prefab, Sprite, SpriteFrame, Tween, tween, UIOpacity, UITransform, Vec2, Vec3, v3 } from 'cc';
 import { GridBoard, GridCellCoord } from './GridBoard';
 import { GridPiece } from './GridPiece';
 import { PackContainer } from './PackContainer';
@@ -7,6 +7,17 @@ import { HandHintRequest, HandHintSource, IdleHandHint } from '../Systems/IdleHa
 import { FxType, Ply_SoundManager } from '../Framework/Ply_SoundManager';
 import { ipm } from '../../Core/Managers/InputManager';
 const { ccclass, property } = _decorator;
+
+/** Xong map thì làm gì. */
+export enum AfterWinMode {
+    /** Hiện endcard Win (logo + nút). */
+    WinCard = 0,
+    /** Chuyển sang level trong endcardLevel (chạm đâu cũng vào store). */
+    NextLevel = 1,
+    /** Giữ nguyên map đã xếp xong, không đổi gì (bản quay video). */
+    Stay = 2,
+}
+ccenum(AfterWinMode);
 
 type DropTarget =
     | { kind: 'container'; container: PackContainer }
@@ -102,6 +113,12 @@ export class GridPackManager extends Component implements HandHintSource {
 
     @property({ tooltip: 'Bật tay gợi ý (cần IdleHandHint trong scene)' })
     public enableHandHint = true;
+
+    @property({ type: AfterWinMode, tooltip: 'Xong map: WinCard = hiện endcard, NextLevel = sang level endcardLevel, Stay = giữ nguyên map (quay video)' })
+    public afterWin: AfterWinMode = AfterWinMode.NextLevel;
+
+    @property({ tooltip: 'Stay: vẫn chạy chuỗi đậy nắp + dồn hộp ra giữa + blink rồi mới đứng yên', visible(this: GridPackManager) { return this.afterWin === AfterWinMode.Stay; } })
+    public stayPlayWinSequence = false;
 
     @property({ type: Node, tooltip: 'Endcard = level mới: node chứa đồ của level sau (để tắt trong scene). Xong level này -> hộp trống lại, đồ level sau bày ra sàn, rồi mới hiện endcard (logo + PLAY NOW). Để trống = WinGame luôn.' })
     public endcardLevel: Node | null = null;
@@ -612,6 +629,8 @@ export class GridPackManager extends Component implements HandHintSource {
         this._won = true;
         IdleHandHint.Ins?.Hide();
         this.node.emit('grid-pack-win');
+        // Bản quay video: giữ nguyên map đã xếp xong
+        if (this.afterWin === AfterWinMode.Stay && !this.stayPlayWinSequence) return true;
         this.scheduleOnce(() => this.playWinSequence(), this.winStartDelay);
         return true;
     }
@@ -657,7 +676,8 @@ export class GridPackManager extends Component implements HandHintSource {
         }, landed + 0.1);
 
         this.scheduleOnce(() => {
-            if (this.endcardLevel) this.showEndcardLevel();
+            if (this.afterWin === AfterWinMode.Stay) return;
+            if (this.afterWin === AfterWinMode.NextLevel && this.endcardLevel) this.showEndcardLevel();
             else GameManager.Ins?.WinGame();
         }, landed + 0.1 + this.blinkDuration);
     }
