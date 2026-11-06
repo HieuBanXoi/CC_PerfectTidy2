@@ -1,4 +1,6 @@
 import { _decorator, Animation, Color, Component, Node, Sprite, Tween, tween, UIOpacity, UITransform, Vec3, v3 } from 'cc';
+import { BindUIType } from '../../Core/Managers/UI';
+import { World } from '../../Core/Managers/World';
 const { ccclass, property } = _decorator;
 
 /**
@@ -37,6 +39,33 @@ export class WinCardIntro extends Component {
 
     @property({ type: Node, tooltip: 'Node nút để bật lên (con của node có Animation pulse)' })
     public button: Node | null = null;
+
+    @property({ tooltip: 'Neo logo sát mép TRÊN màn hình, cách mép bao nhiêu (px world). -1 = giữ vị trí node Logo.' })
+    public logoTopMargin = -1;
+
+    @property({ tooltip: 'Neo nút PLAY NOW sát mép DƯỚI màn hình, cách mép bao nhiêu (px world). -1 = giữ vị trí cũ.' })
+    public buttonBottomMargin = -1;
+
+    @property({ type: Node, tooltip: 'Khung giữa màn hình chứa level mới (con: Wood, Content, Border). Tự co giãn vừa khoảng giữa logo và nút.' })
+    public levelFrame: Node | null = null;
+
+    @property({ tooltip: 'Khoảng cách khung với logo / nút (px)', visible(this: WinCardIntro) { return !!this.levelFrame; } })
+    public frameGap = 30;
+
+    @property({ tooltip: 'Chiều rộng tối đa của khung (px)', visible(this: WinCardIntro) { return !!this.levelFrame; } })
+    public frameMaxWidth = 960;
+
+    @property({ tooltip: 'Viền khung dày bao nhiêu (nền gỗ thụt vào, px)', visible(this: WinCardIntro) { return !!this.levelFrame; } })
+    public frameBorder = 22;
+
+    @property({ tooltip: 'Lề trong: vùng Content (chứa map) thụt vào so với khung (px)', visible(this: WinCardIntro) { return !!this.levelFrame; } })
+    public framePadding = 40;
+
+    @property({ tooltip: 'Tỉ lệ rộng/cao của vùng map trong khung (= endcardMapSize.x / .y của GridPackManager)', visible(this: WinCardIntro) { return !!this.levelFrame; } })
+    public frameAspect = 0.73;
+
+    @property({ tooltip: 'Logo UI chỉ di chuyển thẳng tới chỗ đích (không bay vòng, không nảy, không thở)' })
+    public logoPlainMove = true;
 
     @property public logoDelay = 0.15;
     @property public logoDropY = 260;
@@ -86,6 +115,7 @@ export class WinCardIntro extends Component {
 
     private stopAll() {
         if (this.dim) Tween.stopAllByTarget(this.dim);
+        if (this.levelFrame) { Tween.stopAllByTarget(this.levelFrame); Tween.stopAllByTarget(this.opacityOf(this.levelFrame)); }
         for (const n of [this.logo, this._shown]) {
             if (n && n.isValid) { Tween.stopAllByTarget(n); Tween.stopAllByTarget(this.opacityOf(n)); }
         }
@@ -114,6 +144,8 @@ export class WinCardIntro extends Component {
             const sp = this.panel.getComponent(Sprite);
             if (sp) { const c = sp.color.clone(); c.a = 255; sp.color = c; }
         }
+        this.anchorToEdges();
+        this.showFrame();
 
         // 2. Logo: logo UI đang hiện (dọc hoặc ngang) bay lên endcard; không có thì logo đích rơi xuống
         if (!this._flown && this.flyUILogo()) {
@@ -152,6 +184,76 @@ export class WinCardIntro extends Component {
         }
     }
 
+    /** Neo logo vào mép trên, nút vào mép dưới màn hình (theo UI.getEdge) -> không che gameplay ở giữa. */
+    private anchorToEdges() {
+        const panel = this.panel;
+        const ui = World.instance?.ui;
+        if (!panel || !ui) return;
+        const toLocal = (parent: Node, worldY: number) => {
+            const out = v3();
+            parent.inverseTransformPoint(out, v3(parent.worldPosition.x, worldY, 0));
+            return out.y;
+        };
+        if (this.logoTopMargin >= 0 && this.logo) {
+            const top = ui.getEdge(BindUIType.Top);
+            const h = (this.logo.getComponent(UITransform)?.height || 0) * Math.abs(this._logoScale.y * panel.worldScale.y);
+            this._logoPos.y = toLocal(panel, top - this.logoTopMargin - h * 0.5);
+            this.logo.setPosition(this._logoPos);
+        }
+        const wrap = this.button?.parent;
+        if (this.buttonBottomMargin >= 0 && this.button && wrap && wrap.parent) {
+            const bottom = ui.getEdge(BindUIType.Bottom);
+            const h = (this.button.getComponent(UITransform)?.height || 0) * Math.abs(this._btnScale.y * wrap.worldScale.y);
+            const p = wrap.position;
+            wrap.setPosition(p.x, toLocal(wrap.parent, bottom + this.buttonBottomMargin + h * 0.5), p.z);
+        }
+    }
+
+    /** Khung level mới: co giãn vừa khoảng giữa logo và nút (sau anchorToEdges), rồi bật lên. */
+    private showFrame() {
+        const fr = this.levelFrame, panel = this.panel;
+        if (!fr || !panel) return;
+        const ui = World.instance?.ui;
+        // Khoảng dọc giữa đáy logo và đỉnh nút (local của panel)
+        let top = 600, bottom = -600;
+        if (this.logo) {
+            const lh = (this.logo.getComponent(UITransform)?.height || 0) * Math.abs(this._logoScale.y);
+            top = this._logoPos.y - lh * 0.5 - this.frameGap;
+        }
+        const wrap = this.button?.parent;
+        if (this.button && wrap) {
+            const bh = (this.button.getComponent(UITransform)?.height || 0) * Math.abs(this._btnScale.y * wrap.scale.y);
+            bottom = wrap.position.y + bh * 0.5 + this.frameGap;
+        }
+        // Khung ôm vừa map theo tỉ lệ frameAspect (không thừa trên dưới), không vượt khoảng giữa logo - nút
+        const maxH = Math.max(200, top - bottom);
+        const fullW = ui ? (ui.width * 2) / Math.abs(panel.worldScale.x || 1) : 1080;
+        const pad = this.framePadding;
+        const aspect = Math.max(0.1, this.frameAspect);
+        let w = Math.min(this.frameMaxWidth, fullW - 60);
+        let h = (w - pad * 2) / aspect + pad * 2;
+        if (h > maxH) { h = maxH; w = (h - pad * 2) * aspect + pad * 2; }
+        fr.setPosition(0, (top + bottom) * 0.5, 0);
+        // Khung thấp hơn khoảng trống -> kéo logo xuống, nút lên cho sát khung (cách frameGap)
+        const slack = (maxH - h) * 0.5;
+        if (slack > 0) {
+            if (this.logo) { this._logoPos.y -= slack; this.logo.setPosition(this._logoPos); }
+            if (wrap && this.button) { const p = wrap.position; wrap.setPosition(p.x, p.y + slack, p.z); }
+        }
+        fr.getComponent(UITransform)?.setContentSize(w, h);
+        const size = (name: string, inset: number) => fr.getChildByName(name)?.getComponent(UITransform)?.setContentSize(Math.max(10, w - inset * 2), Math.max(10, h - inset * 2));
+        size('Border', 0);
+        size('Wood', this.frameBorder);
+        size('Content', this.framePadding);
+
+        fr.active = true;
+        const op = this.opacityOf(fr);
+        op.opacity = 0;
+        fr.setScale(0.85, 0.85, 1);
+        tween(op).delay(0.05).to(0.25, { opacity: 255 }).start();
+        tween(fr).delay(0.05).to(0.4, { scale: v3(1, 1, 1) }, { easing: 'backOut' }).start();
+    }
+
     /** Lấy logo UI đang hiện, chuyển vào panel (giữ nguyên vị trí màn hình) rồi bay vòng lên chỗ đích. */
     private flyUILogo(): boolean {
         const target = this.logo, panel = this.panel || target?.parent;
@@ -176,6 +278,14 @@ export class WinCardIntro extends Component {
         const end = this._logoPos.clone();
         const endScale = v3(k, k, 1);
         this._logoScale.set(endScale);
+
+        if (this.logoPlainMove) {
+            // Chỉ di chuyển + đổi cỡ mượt tới chỗ đích
+            tween(fly).delay(this.logoDelay)
+                .to(this.logoDuration, { position: end, scale: endScale, angle: 0 }, { easing: 'sineInOut' })
+                .start();
+            return true;
+        }
 
         const start = fly.position.clone();
         const startScale = fly.scale.clone();
@@ -217,7 +327,7 @@ export class WinCardIntro extends Component {
     /** Logo thở + bồng bềnh lặp lại (lệch pha nhau cho tự nhiên). */
     private startIdle() {
         const logo = this._shown;
-        if (!logo || !logo.isValid) return;
+        if (!logo || !logo.isValid || this.logoPlainMove) return;
         const s = this._logoScale, p = this._logoPos;
         const t = { k: 0 };
         const T = this.idlePeriod;

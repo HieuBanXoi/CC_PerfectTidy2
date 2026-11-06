@@ -103,6 +103,18 @@ export class GridPackManager extends Component implements HandHintSource {
     @property({ tooltip: 'Bật tay gợi ý (cần IdleHandHint trong scene)' })
     public enableHandHint = true;
 
+    @property({ type: Node, tooltip: 'Endcard = level mới: node chứa đồ của level sau (để tắt trong scene). Xong level này -> hộp trống lại, đồ level sau bày ra sàn, rồi mới hiện endcard (logo + PLAY NOW). Để trống = WinGame luôn.' })
+    public endcardLevel: Node | null = null;
+
+    @property({ type: Node, tooltip: 'Node trong endcard (VD Win/Node/LevelFrame/Content): level mới + 2 hộp được chuyển vào đây, thu nhỏ vừa khung, vẽ trên nền tối.', visible(this: GridPackManager) { return !!this.endcardLevel; } })
+    public endcardContent: Node | null = null;
+
+    @property({ tooltip: 'Tâm vùng map (hộp + đồ trên sàn) theo toạ độ local của node này', visible(this: GridPackManager) { return !!this.endcardLevel; } })
+    public endcardMapCenter: Vec2 = new Vec2(0, 190);
+
+    @property({ tooltip: 'Kích thước vùng map cần hiện trong khung', visible(this: GridPackManager) { return !!this.endcardLevel; } })
+    public endcardMapSize: Vec2 = new Vec2(1080, 1500);
+
     private _pieces: GridPiece[] = [];
     private _containers: PackContainer[] = [];
     private _drag: GridPiece | null = null;
@@ -116,6 +128,8 @@ export class GridPackManager extends Component implements HandHintSource {
     private _lastTouch = v3();
     private _introPlaying = false;
     private _pendingBox: { p: GridPiece; start: Vec3; moved: boolean } | null = null;
+    /** Vị trí / scale gốc của các Main Box (trước chuỗi thắng) để dựng lại cho level endcard. */
+    private _boardHome: { pos: Vec3; scale: Vec3 }[] = [];
 
     protected onLoad() {
         GridPackManager.Ins = this;
@@ -127,6 +141,7 @@ export class GridPackManager extends Component implements HandHintSource {
     }
 
     protected start() {
+        this._boardHome = this.boards.map(b => ({ pos: b.node.position.clone(), scale: b.node.scale.clone() }));
         this.collectPieces();
         if (this.enableHandHint) IdleHandHint.Register(this, GridPackManager.HINT_PRIORITY);
         if (this.introPop) this.playIntro();
@@ -138,7 +153,8 @@ export class GridPackManager extends Component implements HandHintSource {
         const set = new Set<GridPiece>();
         for (const root of this.pieceRoots) {
             if (!root) continue;
-            root.getComponentsInChildren(GridPiece).forEach(p => set.add(p));
+            // Bỏ qua node đang tắt -> tắt hộp con / món trong scene là loại khỏi màn chơi
+            root.getComponentsInChildren(GridPiece).forEach(p => { if (p.node.activeInHierarchy) set.add(p); });
         }
         this._pieces = Array.from(set);
         this._containers = this._pieces.map(p => p.getComponent(PackContainer)).filter(c => !!c) as PackContainer[];
@@ -168,6 +184,11 @@ export class GridPackManager extends Component implements HandHintSource {
                 p.node.setScale(0, 0, 1);
                 tween(p.node).delay(0.15 + i * 0.04).to(0.25, { scale: s }, { easing: 'backOut' }).start();
             });
+            // Hiện hết đồ (và hộp) rồi mới cho chạm / hiện tay gợi ý
+            const end = Math.max(0.15 + Math.max(0, foods.length - 1) * 0.04 + 0.25,
+                                 0.1 + Math.max(0, boxes.length - 1) * 0.08 + 0.3);
+            this._introPlaying = true;
+            this.scheduleOnce(() => { this._introPlaying = false; }, end);
             return;
         }
         this.playBagSpill(foods);
@@ -258,6 +279,8 @@ export class GridPackManager extends Component implements HandHintSource {
     // ================================================================ Drag
 
     public onPieceTouchStart(p: GridPiece, e: EventTouch): boolean {
+        // Endcard: chạm vào món (node nuốt touch, input global không nhận) cũng mở store
+        if (GameManager.Ins && GameManager.Ins.isGotoStore) { GameManager.Ins.GotoStore(); return false; }
         // Node đã nuốt touch -> input global của InputManager không nhận: tự bật BGM + firstMove ở lần chạm đầu.
         ipm?.TriggerFirstMove();
         if (this._won || this._drag || this._pendingBox || this._introPlaying) return false;
@@ -296,7 +319,7 @@ export class GridPackManager extends Component implements HandHintSource {
         this._grabOffset.set(p.node.worldPosition.x - touch.x, p.node.worldPosition.y - touch.y, 0);
         // Nâng dần lên trên ngón tay.
         tween(this._grabOffset).to(0.12, { y: Math.max(this._grabOffset.y, this.dragLiftY) }).start();
-        this._targetScale = this.floorScaleOf(p) * this.pickScale;
+        this._targetScale = this.dragScaleOf(p);
         tween(p.node).to(0.1, { angle: p.baseAngle }).start();
         Ply_SoundManager.Ins?.PlayFx(FxType.Click);
         GameManager.Ins?.TurnOffTut?.();
@@ -405,7 +428,7 @@ export class GridPackManager extends Component implements HandHintSource {
         // Scale: trên lưới -> to bằng ô, ngoài -> scale sàn
         this._targetScale = target?.kind === 'board'
             ? p.getBoardFitWorldScale(target.board) * target.board.placeScale
-            : this.floorScaleOf(p) * this.pickScale;
+            : this.dragScaleOf(p);
     }
 
     private findTarget(p: GridPiece, touch: Vec3): DropTarget {
@@ -494,9 +517,10 @@ export class GridPackManager extends Component implements HandHintSource {
             this.scheduleOnce(() => {
                 if (!board.isFull()) return; // người chơi vừa lấy 1 món ra
                 board.playFullFx();
-                if (this._won) return; // chuỗi thắng tự lo phần còn lại
+                // Box nào đầy cũng "Aha" (kể cả box cuối -> game đã thắng từ lúc thả món)
                 this.spawnFx(board.node.worldPosition);
-                if (!this.checkWinCondition()) Ply_SoundManager.Ins?.PlayFx(FxType.Aha);
+                Ply_SoundManager.Ins?.PlayFx(FxType.Aha);
+                this.checkWinCondition();
             }, 0.25);
         }
         this.afterChange();
@@ -505,7 +529,10 @@ export class GridPackManager extends Component implements HandHintSource {
     private dropOnFloor(p: GridPiece, touch: Vec3) {
         const area = this.floorArea?.getComponent(UITransform)?.getBoundingBoxToWorld();
         const center = p.node.worldPosition;
-        const inArea = !!area && area.contains(new Vec2(center.x, center.y));
+        // Chạm vào Main Box mà không đặt vừa -> không được nằm lại đè lên hộp, phải bay về
+        const pr = p.node.getComponent(UITransform)?.getBoundingBoxToWorld();
+        const overBoard = !!pr && this.boards.some(b => b?.node.activeInHierarchy && b.node.getComponent(UITransform)?.getBoundingBoxToWorld().intersects(pr));
+        const inArea = !!area && area.contains(new Vec2(center.x, center.y)) && !overBoard;
         const o = this._origin;
         if (inArea) {
             // Nằm lại chỗ thả
@@ -629,7 +656,78 @@ export class GridPackManager extends Component implements HandHintSource {
             });
         }, landed + 0.1);
 
-        this.scheduleOnce(() => GameManager.Ins?.WinGame(), landed + 0.1 + this.blinkDuration);
+        this.scheduleOnce(() => {
+            if (this.endcardLevel) this.showEndcardLevel();
+            else GameManager.Ins?.WinGame();
+        }, landed + 0.1 + this.blinkDuration);
+    }
+
+    /**
+     * Endcard = level mới: hộp (đã đậy nắp) thu nhỏ biến mất -> dọn đồ level cũ -> hộp trống bật lại ở chỗ cũ
+     * -> đồ level sau bật ra trên sàn -> WinGame (logo + PLAY NOW, chạm đâu cũng vào store).
+     */
+    private showEndcardLevel() {
+        const next = this.endcardLevel!;
+        const out = 0.28;
+        this.boards.forEach(b => {
+            Tween.stopAllByTarget(b.node);
+            tween(b.node).to(out, { scale: v3(0, 0, 1) }, { easing: 'backIn' }).start();
+        });
+        this.scheduleOnce(() => {
+            // Dọn level cũ
+            for (const p of this._pieces) if (p.node.isValid) p.node.destroy();
+            this._pieces = [];
+            this._containers = [];
+            this.boards.forEach((b, i) => {
+                b.resetLevel(0);
+                const home = this._boardHome[i];
+                if (home) { b.node.setPosition(home.pos); b.node.setScale(home.scale); }
+            });
+            // Bày đồ level sau (cỡ món tính theo hộp -> hộp phải đang ở scale gốc)
+            next.active = true;
+            this.pieceRoots = [next];
+            this.collectPieces();
+            this.playIntro();
+            // Hộp trống bật lại
+            this.boards.forEach((b, i) => {
+                const s = b.node.scale.clone();
+                b.node.setScale(0, 0, 1);
+                tween(b.node).delay(i * 0.08).to(0.35, { scale: s }, { easing: 'backOut' }).start();
+            });
+            Ply_SoundManager.Ins?.PlayFx(FxType.Click);
+            if (this.endcardContent) {
+                GameManager.Ins?.WinGame();   // endcard bật (khung đã co giãn xong)
+                this.moveMapIntoFrame();
+            } else {
+                // Không hiện endcard: level sau hiện như gameplay thường, chạm đâu cũng vào store.
+                // Vẫn để isPlaying = true để tay gợi ý chạy ngay (click bait).
+                const gm = GameManager.Ins;
+                if (gm) gm.isGotoStore = true;
+                this._won = false;          // cho GetHandHint trả gợi ý của level sau
+                IdleHandHint.Ins?.ShowNow(); // hiện tay ngay (tự đợi intro bày đồ xong)
+            }
+        }, out + 0.02);
+    }
+
+    /** Chuyển 2 hộp + đồ level mới vào khung giữa endcard (trên nền tối), thu nhỏ vừa khung. */
+    private moveMapIntoFrame() {
+        const content = this.endcardContent;
+        if (!content || !this.endcardLevel) return;
+        const holder = new Node('EndcardMap');
+        holder.layer = content.layer;
+        holder.addComponent(UITransform);
+        content.addChild(holder);
+        const nodes = [...this.boards.map(b => b.node), this.endcardLevel];
+        const setLayer = (n: Node) => { n.layer = content.layer; n.children.forEach(setLayer); };
+        for (const n of nodes) {
+            n.setParent(holder, false); // giữ toạ độ local như trong node gameplay
+            setLayer(n);
+        }
+        const ut = content.getComponent(UITransform);
+        const cw = ut ? ut.width : 800, ch = ut ? ut.height : 1100;
+        const k = Math.min(cw / this.endcardMapSize.x, ch / this.endcardMapSize.y);
+        holder.setScale(k, k, 1);
+        holder.setPosition(-this.endcardMapCenter.x * k, -this.endcardMapCenter.y * k, 0);
     }
 
     /** Blink effect phủ kín node (chỉnh vùng phát + cỡ hạt theo kích thước hộp). */
@@ -840,6 +938,13 @@ export class GridPackManager extends Component implements HandHintSource {
         parent.addChild(fx);
         fx.setWorldPosition(world);
         this.scheduleOnce(() => fx.isValid && fx.destroy(), 2);
+    }
+
+    /** Cỡ khi đang kéo: đúng cỡ của món khi nằm trong Main Box (hộp con giữ cỡ sàn * pickScale). */
+    private dragScaleOf(p: GridPiece): number {
+        const b = (p.solutionBoard >= 0 && this.boards[p.solutionBoard]) || this.boards[0];
+        if (!b || p.getComponent(PackContainer)) return this.floorScaleOf(p) * this.pickScale;
+        return p.getBoardFitWorldScale(b) * b.placeScale;
     }
 
     private floorScaleOf(p: GridPiece): number {

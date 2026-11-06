@@ -41,7 +41,7 @@ export class GridBoard extends Component {
     public cellNamePrefix = 'WhiteBorder';
 
     @property({ tooltip: 'Màu ô khi có thể thả vào' })
-    public highlightColor: Color = new Color(70, 215, 90, 200);
+    public highlightColor: Color = new Color(40, 40, 40, 230);
 
     @property({ type: Node, tooltip: 'Node chứa các piece đã đặt. Để trống = tự tạo node con "Pieces" (vẽ trên các ô).' })
     public piecesRoot: Node | null = null;
@@ -303,6 +303,30 @@ export class GridBoard extends Component {
             const idx = this.node.getSiblingIndex(), gi = g.getSiblingIndex();
             g.setSiblingIndex(gi < idx ? idx - 1 : idx);
         }
+    }
+
+    /**
+     * Đưa hộp về trạng thái trống để chơi level mới: tắt glow, gỡ nắp, xoá dữ liệu ô, hiện lại lưới.
+     * Không huỷ node piece (controller tự lo).
+     */
+    public resetLevel(cellFade = 0) {
+        if (this._glow && this._glow.isValid) {
+            const op = this._glow.getComponent(UIOpacity);
+            if (op) Tween.stopAllByTarget(op);
+            this._glow.active = false;
+        }
+        const cover = this.cover;
+        if (cover) {
+            Tween.stopAllByTarget(cover);
+            const op = cover.getComponent(UIOpacity);
+            if (op) Tween.stopAllByTarget(op);
+            cover.setPosition(this._coverPos);
+            cover.setScale(this._coverScale);
+            cover.active = false;
+        }
+        this.clearHighlight();
+        this.clearAll();
+        this.setCellsVisible(true, cellFade);
     }
 
     /** Nắp rơi từ trên xuống, rõ dần rồi đậy khít hộp. onDone gọi khi nắp chạm hộp. */
