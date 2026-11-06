@@ -13996,7 +13996,7 @@
         "__id__": 475
       }
     ],
-    "_active": true,
+    "_active": false,
     "_components": [
       {
         "__id__": 479
@@ -17361,7 +17361,7 @@
         "__id__": 561
       }
     ],
-    "_active": false,
+    "_active": true,
     "_components": [
       {
         "__id__": 565
@@ -20695,7 +20695,7 @@
     ],
     "pieceRoots": [
       {
-        "__id__": 239
+        "__id__": 480
       }
     ],
     "dragLayer": {
@@ -20745,9 +20745,7 @@
     "enableHandHint": true,
     "afterWin": 2,
     "stayPlayWinSequence": true,
-    "endcardLevel": {
-      "__id__": 480
-    },
+    "endcardLevel": null,
     "endcardContent": null,
     "endcardMapCenter": {
       "__type__": "cc.Vec2",
