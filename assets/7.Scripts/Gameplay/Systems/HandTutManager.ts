@@ -39,6 +39,9 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
     @property(Node)
     public handNode: Node = null!;
 
+    @property({ type: Node, tooltip: 'Nếu gán: mọi gợi ý kéo đều kéo tới node này (ví dụ tâm nhân vật), bỏ qua target riêng của từng tool.' })
+    public fixedDragTarget: Node | null = null;
+
     @property({ tooltip: 'Wait for StartHandTut() instead of beginning automatically.' })
     public waitForStartSignal = false;
 
@@ -187,7 +190,8 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
         const preferredTarget = this.firstHintItem === item && this.isUsableTarget(this.firstHintTarget)
             ? this.firstHintTarget
             : null;
-        const target = preferredTarget ?? this.getActiveTarget(item);
+        const fixedTarget = this.isUsableTarget(this.fixedDragTarget) ? this.fixedDragTarget : null;
+        const target = fixedTarget ?? preferredTarget ?? this.getActiveTarget(item);
         if (target) moveToTarget.defaultTarget = target;
     }
 
@@ -389,6 +393,7 @@ export class HandTutManager extends Ply_Singleton<HandTutManager> {
 
     /** Finds the target relevant to the item's current cleaning turn. */
     private getActiveTarget(item: Item): Node | null {
+        if (this.isUsableTarget(this.fixedDragTarget)) return this.fixedDragTarget;
         const provider = item as HandTutTargetProvider;
 
         const componentTarget = provider.GetHandTutTarget?.();

@@ -1,4 +1,4 @@
-import { _decorator, Node, ParticleSystem2D, Tween, tween, UIOpacity, Vec3, Enum } from 'cc';
+import { _decorator, Node, ParticleSystem2D, Sprite, SpriteFrame, Tween, tween, UIOpacity, UITransform, Vec3, Enum } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
@@ -59,6 +59,42 @@ export class SoapAdd extends Item {
     @property({ type: ParticleSystem2D, tooltip: 'Particle trail ở đầu SoapAdd. Tự lấy ParticleSystem2D con của Brush Point nếu để trống.' })
     public trailParticle: ParticleSystem2D | null = null;
 
+    @property({ tooltip: 'Trail particle chỉ phun khi đang chà (brush di chuyển trong Scrub Area). Tắt: phun suốt lúc kéo.' })
+    public trailOnlyWhenScrubbing = false;
+
+    @property({ type: Node, tooltip: 'Vùng tính là đang chà (theo UITransform, ví dụ thân nhân vật). Để trống: chỉ cần brush đang di chuyển.', visible(this: SoapAdd) { return this.trailOnlyWhenScrubbing; } })
+    public scrubArea: Node | null = null;
+
+    @property({ min: 0, tooltip: 'Emission rate của trail particle khi đang chà.', visible(this: SoapAdd) { return this.trailOnlyWhenScrubbing; } })
+    public scrubTrailEmissionRate = 20;
+
+    @property({ tooltip: 'Khi kích hoạt target chỉ bật Sprite bọt con (pop lên), KHÔNG play particle. Dùng cho bước bóp bình xà phòng.' })
+    public activateSpriteOnly = false;
+
+    @property({ type: [Node], tooltip: 'Các điểm bọt dạng Sprite (đã được bước trước bật lên). Brush đi qua 1 lần là Sprite mờ đi và particle con được play. Bước chỉ xong khi đã chuyển hết.' })
+    public convertTargets: Node[] = [];
+
+    @property({ type: SpriteFrame, tooltip: 'Sprite bọt rơi xuống khi đang chà (brush di chuyển trong Scrub Area). Để trống = tắt.' })
+    public scrubDropSprite: SpriteFrame | null = null;
+
+    @property({ type: Node, tooltip: 'Node cha chứa các bọt rơi (đứng yên, không đi theo brush).' })
+    public scrubDropLayer: Node | null = null;
+
+    @property({ min: 0.01, tooltip: 'Khoảng thời gian giữa 2 bọt rơi khi đang chà (giây).' })
+    public scrubDropInterval = 0.07;
+
+    @property({ tooltip: 'Kích thước bọt rơi (world px).' })
+    public scrubDropSize = 45;
+
+    @property({ tooltip: 'Độ chênh kích thước ngẫu nhiên (world px).' })
+    public scrubDropSizeVar = 15;
+
+    @property({ tooltip: 'Quãng rơi (world px).' })
+    public scrubDropFall = 220;
+
+    @property({ min: 0.05, tooltip: 'Thời gian rơi + mờ dần (giây).' })
+    public scrubDropDuration = 0.8;
+
     @property({ type: [Node], tooltip: 'Các node được bật (hiện dần) khi tất cả target đã kích hoạt (ví dụ soap_sandbox).' })
     public showOnAllDone: Node[] = [];
 
@@ -86,6 +122,11 @@ export class SoapAdd extends Item {
     private lastBrushWorldPosition = new Vec3();
     private hasLastBrushPosition = false;
     private targetWorldPosition = new Vec3();
+    /** Thời gian còn giữ trạng thái "đang chà" sau lần di chuyển cuối (tránh nhấp nháy khi input không tới mỗi frame). */
+    private scrubHoldTime = 0;
+    private scrubDropTimer = 0;
+    private readonly convertedTargets = new Set<Node>();
+    private readonly scrubDropPool: Node[] = [];
 
     private readonly boundOnDragStart = () => this.onDragStart();
     private readonly boundOnDragEnd = () => this.onDragEnd();
@@ -97,6 +138,14 @@ export class SoapAdd extends Item {
         this.trailParticle ??= this.brushPoint?.getComponentInChildren(ParticleSystem2D) ?? null;
         this.initializeTargets();
         this.stopTrailParticle();
+        // Bọt rơi dùng chung SpriteFrame với particle (SoapPTC). Nếu Sprite đẩy frame này vào
+        // dynamic atlas thì UV/texture của frame bị đổi và particle vẽ sai vùng texture.
+        if (this.scrubDropSprite) this.scrubDropSprite.packable = false;
+        // Sprite bọt trên người dùng chung frame với particle SoapPTC: cũng không cho vào dynamic atlas.
+        for (const node of [...this.targetNodes, ...this.convertTargets]) {
+            const sprite = node?.isValid ? node.getComponentInChildren(Sprite) : null;
+            if (sprite?.spriteFrame) sprite.spriteFrame.packable = false;
+        }
     }
 
     protected onEnable(): void {
@@ -191,7 +240,105 @@ export class SoapAdd extends Item {
             }
             state.wasInsideInLastFrame = isInside;
         }
+        for (const node of this.convertTargets) {
+            if (!node?.isValid || this.convertedTargets.has(node)) continue;
+            const sprite = this.getFoamSprite(node);
+            if (!sprite || !sprite.node.activeInHierarchy) continue;
+            node.getWorldPosition(this.targetWorldPosition);
+            const dx = this.brushWorldPosition.x - this.targetWorldPosition.x;
+            const dy = this.brushWorldPosition.y - this.targetWorldPosition.y;
+            if (dx * dx + dy * dy <= radiusSq) {
+                isOverAnyTarget = true;
+                this.convertTarget(node, sprite);
+            }
+        }
         this.updateDragSound(isOverAnyTarget);
+        this.updateScrubTrail(isMoving, dt);
+    }
+
+    /** Bật/tắt emission của trail theo việc đang chà, không reset để bọt đang rơi không bị xoá. */
+    private updateScrubTrail(isMoving: boolean, dt: number): void {
+        if (!this.trailOnlyWhenScrubbing && !this.scrubDropSprite) return;
+        const inArea = !this.scrubArea || this.isInsideNode(this.brushWorldPosition, this.scrubArea);
+        // Giữ trạng thái chà thêm một chút sau lần di chuyển cuối để dòng bọt không bị đứt
+        // khi input không tới đều mỗi frame hoặc tay khựng lại rất ngắn lúc đổi hướng chà.
+        if (isMoving && inArea) this.scrubHoldTime = 0.3;
+        else this.scrubHoldTime = Math.max(0, this.scrubHoldTime - dt);
+        const scrubbing = this.scrubHoldTime > 0;
+
+        if (this.trailOnlyWhenScrubbing && this.trailParticle) {
+            this.trailParticle.emissionRate = scrubbing ? this.scrubTrailEmissionRate : 0;
+        }
+        if (this.scrubDropSprite && scrubbing) {
+            // Bù số bọt theo dt để mật độ đều kể cả khi frame dài (FPS thấp).
+            this.scrubDropTimer -= dt;
+            let guard = 0;
+            while (this.scrubDropTimer <= 0 && guard++ < 6) {
+                this.scrubDropTimer += this.scrubDropInterval;
+                this.spawnScrubDrop();
+            }
+            if (this.scrubDropTimer <= 0) this.scrubDropTimer = this.scrubDropInterval;
+        }
+    }
+
+    /** Một cục bọt nhỏ rơi xuống từ đầu brush rồi mờ dần. */
+    private spawnScrubDrop(): void {
+        const layer = this.scrubDropLayer?.isValid ? this.scrubDropLayer : this.node.parent;
+        if (!layer || !this.scrubDropSprite) return;
+
+        let drop = this.scrubDropPool.pop();
+        if (!drop || !drop.isValid) {
+            drop = new Node('ScrubDrop');
+            drop.addComponent(UITransform);
+            const sprite = drop.addComponent(Sprite);
+            sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+            drop.addComponent(UIOpacity);
+        }
+        drop.layer = layer.layer;
+        if (drop.parent !== layer) drop.setParent(layer);
+        drop.setSiblingIndex(layer.children.length - 1);
+        drop.active = true;
+
+        const sprite = drop.getComponent(Sprite)!;
+        sprite.spriteFrame = this.scrubDropSprite;
+        const parentScale = Math.abs(layer.worldScale.x) || 1;
+        const size = Math.max(4, this.scrubDropSize + (Math.random() * 2 - 1) * this.scrubDropSizeVar) / parentScale;
+        drop.getComponent(UITransform)!.setContentSize(size, size);
+        drop.setScale(1, 1, 1);
+        drop.angle = Math.random() * 360;
+
+        const start = new Vec3(
+            this.brushWorldPosition.x + (Math.random() * 2 - 1) * 40,
+            this.brushWorldPosition.y + (Math.random() * 2 - 1) * 20,
+            this.brushWorldPosition.z,
+        );
+        drop.setWorldPosition(start);
+        const end = new Vec3(start.x + (Math.random() * 2 - 1) * 30, start.y - this.scrubDropFall * (0.7 + Math.random() * 0.6), start.z);
+
+        const opacity = drop.getComponent(UIOpacity)!;
+        Tween.stopAllByTarget(drop);
+        Tween.stopAllByTarget(opacity);
+        opacity.opacity = 235;
+        const d = this.scrubDropDuration;
+        const node = drop;
+        tween(node)
+            .to(d, { worldPosition: end, scale: new Vec3(0.6, 0.6, 1) }, { easing: 'quadIn' })
+            .call(() => {
+                node.active = false;
+                this.scrubDropPool.push(node);
+            })
+            .start();
+        tween(opacity).delay(d * 0.3).to(d * 0.7, { opacity: 0 }).start();
+    }
+
+    private isInsideNode(worldPos: Vec3, node: Node): boolean {
+        if (!node.isValid || !node.activeInHierarchy) return false;
+        const transform = node.getComponent(UITransform);
+        if (!transform) return false;
+        const local = transform.convertToNodeSpaceAR(worldPos);
+        const left = -transform.anchorX * transform.width;
+        const bottom = -transform.anchorY * transform.height;
+        return local.x >= left && local.x <= left + transform.width && local.y >= bottom && local.y <= bottom + transform.height;
     }
 
     private hitTarget(state: SoapTargetState): void {
@@ -207,21 +354,82 @@ export class SoapAdd extends Item {
         (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ReportCleanAction(state.node.worldPosition);
         if (this.playCutSound) Ply_SoundManager.Ins?.PlayFx(this.cutFxType);
         state.node.active = true;
-        const particle = state.node.getComponent(ParticleSystem2D) ?? state.node.getComponentInChildren(ParticleSystem2D);
-        if (particle) {
-            particle.node.active = true;
-            particle.resetSystem();
+        const foamSprite = this.activateSpriteOnly ? this.getFoamSprite(state.node) : null;
+        if (foamSprite) {
+            this.popIn(foamSprite.node);
         } else {
-            console.warn(`[SoapAdd] Target "${state.node.name}" has no ParticleSystem2D.`);
+            const particle = state.node.getComponent(ParticleSystem2D) ?? state.node.getComponentInChildren(ParticleSystem2D);
+            if (particle) {
+                particle.node.active = true;
+                particle.resetSystem();
+            } else {
+                console.warn(`[SoapAdd] Target "${state.node.name}" has no ParticleSystem2D.`);
+            }
         }
 
         this.onTargetActivated.invoke();
-        if (this.targetStates.every(target => target.isActivated)) {
-            this.isDone = true;
-            this.toggleNodesOnAllDone();
-            this.onAllTargetsActivated.invoke();
-            (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
+        this.tryComplete();
+    }
+
+    /** Sprite bọt (không phải particle) bên dưới một điểm soap. */
+    private getFoamSprite(node: Node): Sprite | null {
+        return node.getComponentsInChildren(Sprite).find(s => !s.getComponent(ParticleSystem2D)) ?? null;
+    }
+
+    private popIn(node: Node): void {
+        const scale = node.scale.clone();
+        Tween.stopAllByTarget(node);
+        node.active = true;
+        node.setScale(0, 0, 1);
+        tween(node).to(0.25, { scale }, { easing: 'backOut' }).start();
+    }
+
+    /** Brush cọ tới bọt dạng sprite: sprite mờ đi, particle bọt bắt đầu sủi. */
+    private convertTarget(node: Node, sprite: Sprite): void {
+        this.convertedTargets.add(node);
+        this.hasActivatedTargetInCurrentDrag = true;
+        (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ReportCleanAction(node.worldPosition);
+        if (this.playCutSound) Ply_SoundManager.Ins?.PlayFx(this.cutFxType);
+
+        const particle = node.getComponentInChildren(ParticleSystem2D);
+        if (particle) {
+            particle.node.active = true;
+            particle.resetSystem();
+            this.prewarmParticle(particle);
         }
+        // Crossfade: particle đã đầy ngay từ đầu nên sprite chỉ mờ dần đè lên, không có khoảng hụt.
+        const opacity = sprite.getComponent(UIOpacity) ?? sprite.addComponent(UIOpacity);
+        Tween.stopAllByTarget(opacity);
+        tween(opacity)
+            .to(0.6, { opacity: 0 }, { easing: 'sineInOut' })
+            .call(() => { sprite.node.active = false; opacity.opacity = 255; })
+            .start();
+        this.tryComplete();
+    }
+
+    /** Chạy trước particle cho tới khi đủ số hạt, để bọt hiện đầy ngay thay vì sủi từng hạt một. */
+    private prewarmParticle(particle: ParticleSystem2D): void {
+        const sim = (particle as any)._simulator;
+        if (!sim?.step || !particle.emissionRate) return;
+        const fillTime = Math.min(particle.life, particle.totalParticles / particle.emissionRate) + 0.05;
+        const step = 1 / 30;
+        try {
+            for (let t = 0; t < fillTime; t += step) sim.step(step);
+        } catch (e) {
+            console.warn('[SoapAdd] Prewarm particle failed.', e);
+        }
+    }
+
+    private tryComplete(): void {
+        if (this.isDone) return;
+        if (!this.targetStates.every(target => target.isActivated)) return;
+        const allConverted = this.convertTargets.every(node =>
+            !node?.isValid || this.convertedTargets.has(node) || !this.getFoamSprite(node)?.node.activeInHierarchy);
+        if (!allConverted) return;
+        this.isDone = true;
+        this.toggleNodesOnAllDone();
+        this.onAllTargetsActivated.invoke();
+        (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
     }
 
     private toggleNodesOnAllDone(): void {
@@ -285,6 +493,10 @@ export class SoapAdd extends Item {
         this.trailParticle.enabled = true;
         this.trailParticle.duration = -1;
         this.trailParticle.autoRemoveOnFinish = false;
+        if (this.trailOnlyWhenScrubbing) {
+            this.scrubHoldTime = 0;
+            this.trailParticle.emissionRate = 0;
+        }
         if (this.isTrailPlaying) return;
 
         this.trailParticle.resetSystem();

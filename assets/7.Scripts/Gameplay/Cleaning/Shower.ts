@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, ParticleSystem2D, Sprite, UIOpacity, UITransform, Vec3, Enum, animation, clamp01 } from 'cc';
+import { _decorator, Component, Node, ParticleSystem2D, Sprite, UIOpacity, UITransform, Vec2, Vec3, Enum, animation, clamp01, Tween, tween } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
@@ -72,6 +72,36 @@ export class Shower extends Item {
     @property({ type: [ParticleSystem2D], tooltip: 'Particle soap của step 2. Chúng sẽ stop lần lượt, phân đều trong Required Clean Time Step 2.' })
     public soapParticlesToStopStep2: ParticleSystem2D[] = [];
 
+    @property({ tooltip: 'Step 1: mỗi node trong Fade Out Sprites là một vết bẩn riêng, chỉ mờ khi Brush Point chạm vào vết đó (từng vết một). Xong hết các vết thì step 1 hoàn thành.' })
+    public perSpotFadeStep1: boolean = false;
+
+    @property({ min: 0.05, tooltip: 'Thời gian xịt để làm sạch 1 vết bẩn (giây) khi bật Per Spot Fade Step 1.', visible(this: Shower) { return this.perSpotFadeStep1; } })
+    public spotFadeTime: number = 0.5;
+
+    @property({ tooltip: 'Phát âm thanh one-shot khi sạch 1 vết.', visible(this: Shower) { return this.perSpotFadeStep1; } })
+    public playSpotCleanSound: boolean = true;
+
+    @property({ type: Enum(FxType), tooltip: 'Âm thanh one-shot khi sạch 1 vết (dùng FxType khác Water Fx Type để không cắt loop nước).', visible(this: Shower) { return this.perSpotFadeStep1; } })
+    public spotCleanFxType: FxType = FxType.CleanItemAppear;
+
+    @property({ tooltip: 'Tính là chạm khi UITransform của Brush Point giao với UITransform của target (dễ chơi hơn so với chỉ xét tâm Brush Point).' })
+    public useBrushPointRect: boolean = false;
+
+    @property({ tooltip: 'Phát particle nước suốt lúc đang kéo (không cần chạm target).' })
+    public playWaterWhileDragging: boolean = false;
+
+    @property({ tooltip: 'Sắp xếp Soap Particles To Stop Step 2 theo vị trí từ trên xuống trước khi stop, để xà phòng trôi dần từ trên xuống.' })
+    public sortSoapParticlesTopDown: boolean = false;
+
+    @property({ tooltip: 'Gravity Y gán cho soap particle khi bị stop ở step 2 để các bọt còn lại rơi chậm dần xuống. 0 = giữ nguyên.' })
+    public soapFallGravityY: number = 0;
+
+    @property({ min: 0, tooltip: 'Thời gian (giây) soap particle mờ dần sau khi bị stop ở step 2. 0 = để particle tự tắt theo life.' })
+    public soapFadeDuration: number = 0;
+
+    @property({ type: [Node], tooltip: 'Các node được bật (và play ParticleSystem2D bên trong) khi Shower hoàn thành step cuối (ví dụ Wet PTC).' })
+    public activateOnComplete: Node[] = [];
+
     @property({ type: animation.AnimationController, tooltip: 'Animation Controller nhận trigger IN khi brush vào target và OUT khi brush ra ngoài.' })
     public cleanTargetAnimationController: animation.AnimationController | null = null;
 
@@ -97,6 +127,8 @@ export class Shower extends Item {
     private _stoppedSoapParticlesStep2: number = 0;
     private _isBrushInsideCleanTarget: boolean = false;
     private _hasActivatedWetParticle: boolean = false;
+    private _hasSortedSoapParticles: boolean = false;
+    private _spotCleanTimes: number[] = [];
 
     private _fadeOutOpacityStates: FadeOpacityState[][] = [[], []];
     private _fadeInOpacityStates: FadeOpacityState[][] = [[], []];
@@ -192,6 +224,10 @@ export class Shower extends Item {
         }
         this._isDragging = true;
         this._hasCleanedInCurrentDrag = false;
+        if (this.playWaterWhileDragging) {
+            this.startWaterParticles();
+            this.startWaterSound();
+        }
     }
 
     public onDragEnd(): void {
@@ -220,6 +256,11 @@ export class Shower extends Item {
             return;
         }
 
+        if (this._currentCleanStep === 0 && this.perSpotFadeStep1) {
+            this.updatePerSpotFade(dt);
+            return;
+        }
+
         const isTouching = this.checkTouchingTarget(this.getCleanTarget(this._currentCleanStep));
         this.updateCleanTargetAnimationState(isTouching);
 
@@ -243,9 +284,48 @@ export class Shower extends Item {
             if (progress >= 1.0 && !this._isCompleted) {
                 this.completeCurrentStep();
             }
-        } else {
+        } else if (!this.playWaterWhileDragging) {
             this.stopWaterParticles();
             this.stopWaterSound();
+        }
+    }
+
+    /** Step 1 kiểu từng vết: chỉ vết đầu tiên đang bị Brush Point chạm mới mờ dần. */
+    private updatePerSpotFade(dt: number): void {
+        const states = this._fadeOutOpacityStates[0];
+        const fadeTime = Math.max(0.05, this.spotFadeTime);
+        let touchedSpot = false;
+
+        for (let i = 0; i < states.length; i++) {
+            const op = states[i].opacity;
+            if (!op || !op.isValid || !op.node.activeInHierarchy || this._spotCleanTimes[i] >= fadeTime) continue;
+            if (!this.checkTouchingTarget(op.node)) continue;
+
+            touchedSpot = true;
+            this._spotCleanTimes[i] = (this._spotCleanTimes[i] ?? 0) + Math.min(dt, 0.1);
+            const progress = clamp01(this._spotCleanTimes[i] / fadeTime);
+            op.opacity = Math.round((1 - progress) * states[i].initialOpacity);
+            if (progress >= 1) {
+                op.node.active = false;
+                if (this.playSpotCleanSound) Ply_SoundManager.Ins?.PlayFx(this.spotCleanFxType);
+            }
+            break;
+        }
+
+        this.updateCleanTargetAnimationState(touchedSpot);
+        if (touchedSpot) {
+            this._hasCleanedInCurrentDrag = true;
+            this.startWaterParticles();
+            this.startWaterSound();
+        } else if (!this.playWaterWhileDragging) {
+            this.stopWaterParticles();
+            this.stopWaterSound();
+        }
+
+        const allClean = states.every((state, i) =>
+            !state.opacity?.isValid || !state.opacity.node.activeInHierarchy || this._spotCleanTimes[i] >= fadeTime);
+        if (allClean && !this._isCompleted) {
+            this.completeCurrentStep();
         }
     }
 
@@ -256,6 +336,13 @@ export class Shower extends Item {
 
     /** Returns the target for the currently active shower step. */
     public GetHandTutTarget(): Node | null {
+        if (this._currentCleanStep === 0 && this.perSpotFadeStep1) {
+            const fadeTime = Math.max(0.05, this.spotFadeTime);
+            const states = this._fadeOutOpacityStates[0];
+            const next = states.find((state, i) =>
+                state.opacity?.isValid && state.opacity.node.activeInHierarchy && !(this._spotCleanTimes[i] >= fadeTime));
+            if (next) return next.opacity.node;
+        }
         return this.getCleanTarget(this._currentCleanStep);
     }
 
@@ -270,6 +357,13 @@ export class Shower extends Item {
         }
 
         const brush = this.brushPoint ? this.brushPoint : this.node;
+        if (this.useBrushPointRect) {
+            const brushTransform = brush.getComponent(UITransform);
+            const targetTransform = target.getComponent(UITransform);
+            if (brushTransform && targetTransform) {
+                return brushTransform.getBoundingBoxToWorld().intersects(targetTransform.getBoundingBoxToWorld());
+            }
+        }
         brush.getWorldPosition(this._tempWorldPos);
 
         const targetTransform = target.getComponent(UITransform);
@@ -316,6 +410,13 @@ export class Shower extends Item {
 
     /** Stop các particle soap step 2 theo từng mốc thời gian được chia đều. */
     private updateStep2SoapParticles(progress: number): void {
+        if (this.sortSoapParticlesTopDown && !this._hasSortedSoapParticles) {
+            this._hasSortedSoapParticles = true;
+            this.soapParticlesToStopStep2 = this.soapParticlesToStopStep2
+                .filter(p => !!p && p.isValid)
+                .sort((a, b) => b.node.worldPosition.y - a.node.worldPosition.y);
+        }
+
         const stopEndProgress = clamp01(
             (Number.isFinite(this.step2SoapStopEndPercent) ? this.step2SoapStopEndPercent : 70) / 100,
         );
@@ -332,7 +433,16 @@ export class Shower extends Item {
         while (this._stoppedSoapParticlesStep2 < stopCount) {
             const particle = this.soapParticlesToStopStep2[this._stoppedSoapParticlesStep2++];
             if (particle && particle.isValid) {
+                if (this.soapFallGravityY !== 0) {
+                    // Bọt đang bám trên người trôi chậm xuống dưới rồi tan dần theo life.
+                    particle.gravity = new Vec2(particle.gravity.x * 0.2, this.soapFallGravityY);
+                }
                 particle.stopSystem();
+                if (this.soapFadeDuration > 0) {
+                    const op = particle.node.getComponent(UIOpacity) ?? particle.node.addComponent(UIOpacity);
+                    Tween.stopAllByTarget(op);
+                    tween(op).to(this.soapFadeDuration, { opacity: 0 }, { easing: 'sineIn' }).start();
+                }
             }
         }
     }
@@ -385,6 +495,15 @@ export class Shower extends Item {
         this.isDone = true;
         this.stopWaterParticles();
         this.stopWaterSound();
+
+        for (const node of this.activateOnComplete) {
+            if (!node || !node.isValid) continue;
+            node.active = true;
+            for (const particle of node.getComponentsInChildren(ParticleSystem2D)) {
+                particle.node.active = true;
+                particle.resetSystem();
+            }
+        }
 
         this.onShowerComplete.invoke();
 

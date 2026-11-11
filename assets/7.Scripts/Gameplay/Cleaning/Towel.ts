@@ -1,4 +1,4 @@
-import { _decorator, Node, Sprite, UITransform, Vec3, Enum } from 'cc';
+import { _decorator, Color, Node, ParticleSystem2D, Sprite, UITransform, Vec3, Enum } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
@@ -17,6 +17,9 @@ class TowelTargetState {
     public readonly sprite: Sprite | null;
     public readonly initialOpacity: number;
     public readonly transform: UITransform | null;
+    /** Target không có Sprite nhưng có particle (ví dụ Wet PTC): giảm dần emission rồi stop. */
+    public readonly particle: ParticleSystem2D | null;
+    public readonly initialEmissionRate: number;
 
     constructor(public readonly node: Node) {
         // Fade from the Sprite's authored alpha, not a generated UIOpacity.
@@ -25,6 +28,8 @@ class TowelTargetState {
         this.sprite = node.getComponent(Sprite) ?? node.getComponentInChildren(Sprite);
         this.initialOpacity = this.sprite?.color.a ?? 255;
         this.transform = node.getComponent(UITransform);
+        this.particle = this.sprite ? null : node.getComponentInChildren(ParticleSystem2D);
+        this.initialEmissionRate = this.particle?.emissionRate ?? 0;
     }
 }
 
@@ -42,6 +47,12 @@ export class Towel extends Item {
 
     @property({ min: 0.1, tooltip: 'Thời gian Brush Point cần ở trên mỗi target để lau mờ hoàn toàn (giây).' })
     public requiredFadeTime = 2;
+
+    @property({ type: [Sprite], tooltip: 'Các sprite của khăn sẽ đổi dần sang Wet Tint Color theo tiến độ lau (khăn thấm nước).' })
+    public wetTintSprites: Sprite[] = [];
+
+    @property({ tooltip: 'Màu khăn khi đã thấm nước hoàn toàn.' })
+    public wetTintColor: Color = new Color(120, 115, 105, 255);
 
     @property({ tooltip: 'Play a sound when a towel target is cleaned.' })
     public playCutSound: boolean = true;
@@ -74,6 +85,7 @@ export class Towel extends Item {
     private brushWorldPosition = new Vec3();
     private targetWorldPosition = new Vec3();
     private brushLocalPosition = new Vec3();
+    private readonly tintBaseColors = new Map<Sprite, Color>();
 
     private readonly boundOnDragStart = () => this.onDragStart();
     private readonly boundOnDragEnd = () => this.onDragEnd();
@@ -83,6 +95,9 @@ export class Towel extends Item {
         this.allowHandTutDragWithoutTargetType = true;
         this.itemDraggable ??= this.getComponent(ItemDraggable);
         this.initializeTargets();
+        for (const sprite of this.wetTintSprites) {
+            if (sprite?.isValid) this.tintBaseColors.set(sprite, sprite.color.clone());
+        }
     }
 
     protected onEnable(): void {
@@ -206,18 +221,42 @@ export class Towel extends Item {
         state.cleanTime += dt;
 
         const progress = Math.min(1, state.cleanTime / this.getRequiredFadeTime());
+        this.updateWetTint();
         if (state.sprite && state.sprite.isValid) {
             const color = state.sprite.color.clone();
             color.a = Math.round((1 - progress) * state.initialOpacity);
             state.sprite.color = color;
         }
+        if (state.particle && state.particle.isValid) {
+            state.particle.emissionRate = Math.max(0, state.initialEmissionRate * (1 - progress));
+        }
 
         if (progress >= 1 && state.node.isValid) {
             state.isFaded = true;
-            state.node.active = false;
+            if (state.particle && state.particle.isValid) {
+                // Giữ node để các hạt còn lại tan dần thay vì biến mất đột ngột.
+                state.particle.stopSystem();
+            } else {
+                state.node.active = false;
+            }
             if (this.playCutSound) Ply_SoundManager.Ins?.PlayFx(this.cutFxType);
             this.onTargetFaded.invoke();
             this.tryCompleteTowel();
+        }
+    }
+
+    /** Khăn tối dần theo tiến độ lau của tất cả target. */
+    private updateWetTint(): void {
+        if (this.tintBaseColors.size === 0 || this.targetStates.length === 0) return;
+        const required = this.getRequiredFadeTime();
+        const progress = this.targetStates.reduce((sum, s) => sum + Math.min(1, s.cleanTime / required), 0)
+            / this.targetStates.length;
+        const color = new Color();
+        for (const [sprite, base] of this.tintBaseColors) {
+            if (!sprite.isValid) continue;
+            Color.lerp(color, base, this.wetTintColor, progress);
+            color.a = base.a;
+            sprite.color = color;
         }
     }
 

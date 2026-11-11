@@ -1,4 +1,4 @@
-import { _decorator, Node, ParticleSystem2D, Sprite, UITransform, Vec3, Enum } from 'cc';
+import { _decorator, Node, ParticleSystem2D, Sprite, Tween, tween, UITransform, Vec3, Enum } from 'cc';
 import { Item } from '../Items/Components/Item';
 import { ItemDraggable } from '../Items/Components/ItemDraggable';
 import { ItemCleanManager } from '../Systems/ItemCleanManager';
@@ -76,6 +76,18 @@ export class Blowdryer extends Item {
     @property({ min: 0.1, tooltip: 'Thời gian Brush Point cần ở trên mỗi target để làm mờ hết target đó (giây).' })
     public requiredFadeTime = 2;
 
+    @property({ type: [Node], tooltip: 'Các node bật lên khi đang kéo máy sấy (ví dụ hiệu ứng gió), tắt khi thả.' })
+    public effectNodes: Node[] = [];
+
+    @property({ type: [Node], tooltip: 'Các node ẩn lúc đầu, mọc ra lần lượt (pop scale) theo tiến độ sấy tổng (ví dụ lông f_1..f_4).' })
+    public revealOnProgress: Node[] = [];
+
+    @property({ tooltip: 'Phát âm thanh pop khi mỗi node Reveal On Progress mọc ra.' })
+    public playRevealSound = true;
+
+    @property({ tooltip: 'Chỉ cho các node Reveal On Progress mọc ra khi đã sấy xong (mọc lần lượt ngay sau nhau).' })
+    public revealOnlyOnComplete = false;
+
     @property({ tooltip: 'Play a sound when a blowdryer target is cleaned.' })
     public playCutSound: boolean = true;
 
@@ -108,6 +120,8 @@ export class Blowdryer extends Item {
     private brushWorldPosition = new Vec3();
     private targetWorldPosition = new Vec3();
     private brushLocalPosition = new Vec3();
+    private revealedCount = 0;
+    private readonly revealScales = new Map<Node, Vec3>();
 
     private readonly boundOnDragStart = () => this.onDragStart();
     private readonly boundOnDragEnd = () => this.onDragEnd();
@@ -117,6 +131,11 @@ export class Blowdryer extends Item {
         this.allowHandTutDragWithoutTargetType = true;
         this.itemDraggable ??= this.getComponent(ItemDraggable);
         this.initializeTargets();
+        for (const node of this.revealOnProgress) {
+            if (!node?.isValid) continue;
+            this.revealScales.set(node, node.scale.clone());
+            node.active = false;
+        }
         this.stopBlowParticles();
     }
 
@@ -268,7 +287,36 @@ export class Blowdryer extends Item {
             state.revealVisual.color = color;
         }
 
+        this.updateRevealOnProgress();
         this.finishTargetFadeIfNeeded(state, fadeProgress);
+    }
+
+    /** Pop lần lượt các node revealOnProgress theo tiến độ sấy của tất cả target. */
+    private updateRevealOnProgress(): void {
+        const total = this.revealOnProgress.length;
+        if (this.revealOnlyOnComplete || total === 0 || this.revealedCount >= total || this.targetStates.length === 0) return;
+
+        const required = Math.max(0.1, this.requiredFadeTime);
+        const progress = this.targetStates.reduce((sum, s) => sum + Math.min(1, s.cleanTime / required), 0)
+            / this.targetStates.length;
+        // Node đầu tiên mọc ngay khi bắt đầu sấy được một chút, node cuối mọc lúc xong.
+        const shouldReveal = Math.min(total, Math.ceil(progress * total - 0.0001));
+        while (this.revealedCount < shouldReveal) {
+            this.popNode(this.revealOnProgress[this.revealedCount++]);
+        }
+    }
+
+    private popNode(node: Node | null, delay = 0): void {
+        if (!node?.isValid) return;
+        const scale = this.revealScales.get(node) ?? Vec3.ONE;
+        Tween.stopAllByTarget(node);
+        node.active = true;
+        node.setScale(0, 0, 1);
+        tween(node)
+            .delay(delay)
+            .call(() => { if (this.playRevealSound) Ply_SoundManager.Ins?.PlayFx(FxType.CleanItemAppear); })
+            .to(0.3, { scale }, { easing: 'backOut' })
+            .start();
     }
 
     private finishTargetFadeIfNeeded(state: BlowdryerTargetState, fadeProgress: number): void {
@@ -280,6 +328,11 @@ export class Blowdryer extends Item {
             this.onTargetFaded.invoke();
         if (!this.targetStates.every(target => target.isFaded)) return;
 
+        let order = 0;
+        while (this.revealedCount < this.revealOnProgress.length) {
+            this.popNode(this.revealOnProgress[this.revealedCount++], 0.15 + (order++) * 0.08);
+        }
+        this.stopBlowParticles();
         this.isDone = true;
         this.onAllTargetsFaded.invoke();
         (this.itemCleanManager ?? ItemCleanManager.Ins as ItemCleanManager | null)?.ItemCleanDone();
@@ -297,6 +350,9 @@ export class Blowdryer extends Item {
         if (this.isBlowParticlesPlaying) return;
 
         this.isBlowParticlesPlaying = true;
+        for (const node of this.effectNodes) {
+            if (node?.isValid) node.active = true;
+        }
         for (const particle of [this.blowParticle1, this.blowParticle2]) {
             if (!particle || !particle.isValid) continue;
             particle.node.active = true;
@@ -306,6 +362,9 @@ export class Blowdryer extends Item {
 
     private stopBlowParticles(): void {
         this.isBlowParticlesPlaying = false;
+        for (const node of this.effectNodes) {
+            if (node?.isValid) node.active = false;
+        }
         this.blowParticle1?.stopSystem();
         this.blowParticle2?.stopSystem();
     }
